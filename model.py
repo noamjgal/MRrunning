@@ -817,46 +817,6 @@ def create_excel_report(all_models, model_summaries, model_coefficients):
             col_letter = get_column_letter(col)
             worksheet.column_dimensions[col_letter].width = 18
     
-    # 5. Add a note about the model
-    note_df = pd.DataFrame({
-        'Note': [
-            'MODEL INTERPRETATION:',
-            '',
-            'This model uses a standard regression approach to analyze the effect of green environments on various outcomes.',
-            'For each dependent variable, the model estimates:',
-            '',
-            '1. Overall Green Effect: The general effect of any green environment vs control.',
-            '',
-            '2. Interaction Effects: How different types of green environments (shrubs vs trees) differ from the average green effect.',
-            '   - Green_Shrub: Differential effect of shrubs compared to the average green effect',
-            '   - Green_Tree: Differential effect of trees compared to the average green effect',
-            '',
-            '3. Total Effects: The complete effect of each specific environment type.',
-            '   - Shrub Total = Overall Green + Shrub Interaction',
-            '   - Tree Total = Overall Green + Tree Interaction',
-            '',
-            '4. Standardized Effects (Cohen\'s d): Effect sizes standardized by the residual standard deviation.',
-            '   - Values around 0.2 are considered small',
-            '   - Values around 0.5 are considered medium',
-            '   - Values around 0.8 are considered large',
-            '',
-            'COVARIATES:',
-            'RunOrder_num: Controls for potential order effects',
-            'Age: Controls for age differences between participants',
-            'Gender_num: Controls for gender differences',
-            'MRExperience_num: Controls for prior experience with mixed reality',
-            'VO2max: Controls for fitness level',
-            'AvgSkinTemp: Controls for skin temperature',
-            'Presence_Avg: Controls for sense of presence',
-            '',
-            'Significance codes: *** p<0.001, ** p<0.01, * p<0.05, . p<0.1'
-        ]
-    })
-    note_df.to_excel(writer, sheet_name='Notes', index=False)
-    
-    # Close the Excel writer
-    writer.close()
-    
     print(f"Excel report saved to {excel_path}")
     return excel_path
 
