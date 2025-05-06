@@ -143,7 +143,7 @@ dep_vars = ['PRS_Avg', 'PlaceAttach_Avg', 'PositiveAffect_Avg', 'NegativeAffect_
             'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR']
 
 # Define covariates from explore.py
-covariates = ['RunOrder_num', 'Age', 'Gender_num', 'MRExperience_num', 'VO2max', 'AvgSkinTemp', 'TimeOfDay', 'Presence_Avg']
+covariates = ['RunOrder_num', 'Age', 'Gender_num', 'VO2max', 'AvgSkinTemp', 'Presence_Avg']
 
 # Remove any rows with missing values in key columns
 df = df.dropna(subset=['ParticipantID', 'Condition_num'])
@@ -167,6 +167,7 @@ def run_mixed_effects_model(data, dep_var, covariates_list):
     """
     Run a mixed effects model with participant random intercepts
     to properly estimate within-subject effects while including covariates.
+    Uses a simplified approach to avoid singular matrix errors.
     """
     print(f"\nAnalyzing {dep_var}")
     
@@ -181,12 +182,32 @@ def run_mixed_effects_model(data, dep_var, covariates_list):
     
     if participants_with_multiple < 5:
         print(f"  WARNING: Not enough participants with multiple observations")
-        
-    # Check for covariates with sufficient non-missing values
+    
+    # Determine which covariates to use based on available data
+    # Only use a small set of key covariates to avoid overfitting
     valid_covariates = []
+    
+    # Check for sufficient non-missing values (at least 80% present)
     for cov in covariates_list:
         if cov in model_data.columns and model_data[cov].notna().sum() > len(model_data) * 0.8:
+            # Don't include composite variables if we have their components
+            if cov == 'Presence_Avg' and 'Presence' in dep_vars:
+                continue
             valid_covariates.append(cov)
+    
+    # For very limited models, we'll only use a few key covariates
+    # Keep these to maximum 3-4 covariates for stability
+    key_covariates = ['RunOrder_num', 'Gender_num']
+    
+    # Add one physiological variable if available
+    if 'VO2max' in valid_covariates:
+        key_covariates.append('VO2max')
+    elif 'AvgHR' in valid_covariates and dep_var != 'AvgHR':
+        key_covariates.append('AvgHR')
+        
+    # Ensure we're not overfitting
+    valid_covariates = [cov for cov in key_covariates if cov in valid_covariates]
+    print(f"  Using covariates: {valid_covariates}")
     
     # Null model to estimate baseline variance components
     try:
@@ -216,51 +237,70 @@ def run_mixed_effects_model(data, dep_var, covariates_list):
         print(f"  Error fitting null model: {str(e)}")
         null_fit = None
     
-    # Center all numeric covariates within-subject to separate within and between effects
-    # This technique is known as person-mean centering (or within-cluster centering)
+    # Create copy of model data for analysis
     model_data = model_data.copy()
     
-    # Identify numeric covariates to center
-    numeric_covs = [cov for cov in valid_covariates if cov not in ['ParticipantID', 'ExperimentID', 'Gender_num']]
+    # Create IsGreen variable based on Condition_num
+    if 'IsGreen' not in model_data.columns:
+        model_data['IsGreen'] = (model_data['Condition_num'] > 0).astype(int)
+    
+    # For categorical covariates, we'll use them as-is
+    categorical_covs = [cov for cov in valid_covariates if cov in ['Gender_num']]
+    
+    # For numeric covariates, we'll center them for within-subject effects
+    # But we won't create separate between-subject terms to reduce parameters
+    numeric_covs = [cov for cov in valid_covariates if cov not in categorical_covs and cov != 'ParticipantID']
     
     for cov in numeric_covs:
-        # Calculate participant means for each covariate
-        cov_means = model_data.groupby('ParticipantID')[cov].transform('mean')
+        # Group-mean centering - subtract the participant's mean
+        # This isolates the within-subject effect
+        model_data[f'{cov}_c'] = model_data.groupby('ParticipantID')[cov].transform(
+            lambda x: x - x.mean()
+        )
+    
+    # Build formula components
+    if numeric_covs:
+        # Use centered versions for all numeric covariates
+        numeric_terms = " + ".join([f"{cov}_c" for cov in numeric_covs])
+        if numeric_terms:
+            numeric_terms = " + " + numeric_terms
+    else:
+        numeric_terms = ""
+    
+    if categorical_covs:
+        categorical_terms = " + " + " + ".join(categorical_covs)
+    else:
+        categorical_terms = ""
+    
+    # For GreenType, include as a main effect and interaction
+    if 'GreenType' in model_data.columns:
+        # Create a binary indicator for Trees vs Shrubs
+        # Only among green conditions, to avoid confounding with the IsGreen effect
+        green_rows = model_data['IsGreen'] == 1
+        model_data['IsTree'] = 0
+        model_data.loc[green_rows & (model_data['GreenType'] == 'Trees'), 'IsTree'] = 1
         
-        # Create within-subject (centered) version of covariate
-        model_data[f'{cov}_within'] = model_data[cov] - cov_means
-        
-        # Create between-subject version of covariate (participant means)
-        model_data[f'{cov}_between'] = cov_means
+        # Include interaction with IsGreen
+        green_type_terms = " + IsTree + IsGreen:IsTree"
+    else:
+        green_type_terms = ""
     
-    # Include both non-centered categorical covariates and centered numeric covariates
-    # in the model formula
-    within_covs_str = ""
-    between_covs_str = ""
-    categorical_covs_str = ""
+    # Create simplified formula
+    mixed_formula = f"{dep_var} ~ IsGreen{numeric_terms}{categorical_terms}{green_type_terms}"
+    print(f"  Mixed model formula: {mixed_formula}")
     
-    for cov in valid_covariates:
-        if cov in numeric_covs:
-            # For numeric covariates, include both within and between terms
-            within_covs_str += f" + {cov}_within"
-            between_covs_str += f" + {cov}_between"
-        elif cov not in ['ParticipantID', 'ExperimentID']:
-            # For categorical covariates, include as is
-            categorical_covs_str += f" + {cov}"
-    
-    # 1. Standard model with treatment coding (IsGreen = 0/1)
-    standard_formula = f"{dep_var} ~ IsGreen{within_covs_str}{between_covs_str}{categorical_covs_str}"
-    print(f"  Standard formula: {standard_formula}")
-    
-    standard_fit = None
+    # First try with standard mixed model
     try:
-        # Fit standard mixed effects model
-        standard_model = smf.mixedlm(standard_formula, model_data, groups=model_data["ParticipantID"])
-        standard_fit = standard_model.fit(reml=True)
+        # Fit mixed effects model with standard approach
+        mixed_model = smf.mixedlm(mixed_formula, model_data, groups=model_data["ParticipantID"])
+        mixed_fit = mixed_model.fit(reml=True)
+        
+        # Success! Extract results
+        print(f"  Mixed model fitted successfully")
         
         # Extract variance components
-        between_var = standard_fit.cov_re.iloc[0, 0]
-        within_var = standard_fit.scale
+        between_var = mixed_fit.cov_re.iloc[0, 0]
+        within_var = mixed_fit.scale
         total_var = between_var + within_var
         icc = between_var / total_var if total_var > 0 else np.nan
         
@@ -282,12 +322,12 @@ def run_mixed_effects_model(data, dep_var, covariates_list):
         
         # Create summary
         coef_df = pd.DataFrame({
-            'Coefficient': standard_fit.params,
-            'Std Error': standard_fit.bse,
-            'z': standard_fit.tvalues,
-            'P>|z|': standard_fit.pvalues,
-            'CI 2.5%': standard_fit.conf_int()[0],
-            'CI 97.5%': standard_fit.conf_int()[1]
+            'Coefficient': mixed_fit.params,
+            'Std Error': mixed_fit.bse,
+            'z': mixed_fit.tvalues,
+            'P>|z|': mixed_fit.pvalues,
+            'CI 2.5%': mixed_fit.conf_int()[0],
+            'CI 97.5%': mixed_fit.conf_int()[1]
         })
         
         # Add significance indicators
@@ -297,91 +337,203 @@ def run_mixed_effects_model(data, dep_var, covariates_list):
                                                        '*' if p < 0.05 else
                                                        '.' if p < 0.1 else '')
         
+        # Categorize parameters as within or between effects
+        coef_df['Effect_Type'] = coef_df.index.map(
+            lambda x: 'Within-Subject' if x == 'IsGreen' or x.endswith('_c') or 'IsGreen:' in x 
+                    else 'Between-Subject' if x == 'IsTree' or x in categorical_covs
+                    else 'Intercept' if x == 'Intercept' 
+                    else 'Other'
+        )
+        
         # Store model and summary
-        all_models[dep_var] = standard_fit
+        all_models[dep_var] = mixed_fit
         model_summaries[dep_var] = {
             'coefficients': coef_df,
-            'formula': standard_formula,
+            'formula': mixed_formula,
             'n_obs': len(model_data),
             'n_participants': model_data['ParticipantID'].nunique(),
             'n_with_multiple': participants_with_multiple,
-            'log_likelihood': standard_fit.llf,
-            'aic': standard_fit.aic,
-            'bic': standard_fit.bic
+            'log_likelihood': mixed_fit.llf,
+            'aic': mixed_fit.aic,
+            'bic': mixed_fit.bic
         }
         
         # Print key results
-        print(f"  Standard model results:")
-        print(f"    IsGreen effect (within-subject): {standard_fit.params['IsGreen']:.3f}, p-value: {standard_fit.pvalues['IsGreen']:.4f}")
-        print(f"    Model fit: AIC = {standard_fit.aic:.1f}, BIC = {standard_fit.bic:.1f}")
+        print(f"  Mixed model results:")
+        print(f"    IsGreen effect (within-subject): {mixed_fit.params['IsGreen']:.3f}, p-value: {mixed_fit.pvalues['IsGreen']:.4f}")
+        
+        # Print interaction effects if they exist
+        if 'IsGreen:IsTree' in mixed_fit.params:
+            print(f"    IsGreen x Trees interaction: {mixed_fit.params['IsGreen:IsTree']:.3f}, p-value: {mixed_fit.pvalues['IsGreen:IsTree']:.4f}")
+        
+        print(f"    Model fit: AIC = {mixed_fit.aic:.1f}, BIC = {mixed_fit.bic:.1f}")
         print(f"    Within-participant variance explained: {explained_var*100:.1f}%" if not np.isnan(explained_var) else "    Within-participant variance explained: NA")
         
     except Exception as e:
-        print(f"  Error fitting standard model: {str(e)}")
-    
-    # 2. Calculate effect size statistics for the within-subject effect
-    # This helps with interpretation alongside the mixed effects model
-    complete_participants = []
-    for pid, group in model_data.groupby('ParticipantID'):
-        if 0 in group['IsGreen'].values and 1 in group['IsGreen'].values:
-            complete_participants.append(pid)
-    
-    print(f"  Participants with both conditions: {len(complete_participants)}")
-    
-    if len(complete_participants) > 10:
-        # Create a dataframe with paired differences for effect size calculation
-        diff_data = []
+        # If standard mixed model fails, try robust approach
+        print(f"  Error fitting standard mixed model: {str(e)}")
+        print(f"  Trying simplified model...")
         
-        for pid in complete_participants:
-            p_data = model_data[model_data['ParticipantID'] == pid]
-            if len(p_data) == 2:  # Exactly one control and one green observation
-                control_val = p_data[p_data['IsGreen'] == 0][dep_var].values[0]
-                green_val = p_data[p_data['IsGreen'] == 1][dep_var].values[0]
-                
-                # Store within-subject difference
-                diff = green_val - control_val
-                diff_data.append({
-                    'ParticipantID': pid,
-                    'Difference': diff,
-                })
+        # Further simplify formula - remove interactions and use just IsGreen
+        simplified_formula = f"{dep_var} ~ IsGreen"
         
-        # Convert to dataframe
-        if diff_data:
-            within_df = pd.DataFrame(diff_data)
+        try:
+            # Try with just IsGreen
+            mixed_model = smf.mixedlm(simplified_formula, model_data, groups=model_data["ParticipantID"])
+            mixed_fit = mixed_model.fit(reml=True)
             
-            # Calculate Cohen's d (standardized effect size)
-            mean_diff = within_df['Difference'].mean()
-            sd_diff = within_df['Difference'].std()
-            cohens_d = mean_diff / sd_diff if sd_diff > 0 else np.nan
-            se_diff = sd_diff / np.sqrt(len(within_df))
+            print(f"  Simplified mixed model fitted successfully")
             
-            # Store effect size results
-            effect_size_stats = {
-                'mean_diff': mean_diff,
-                'sd_diff': sd_diff,
-                'se_diff': se_diff,
-                'cohens_d': cohens_d,
-                'n': len(within_df)
+            # Extract variance components
+            between_var = mixed_fit.cov_re.iloc[0, 0]
+            within_var = mixed_fit.scale
+            total_var = between_var + within_var
+            icc = between_var / total_var if total_var > 0 else np.nan
+            
+            # Calculate explained variance
+            if null_fit is not None:
+                # Proportion of variance explained by fixed effects
+                null_total_var = null_fit.cov_re.iloc[0, 0] + null_fit.scale
+                explained_var = 1 - (total_var / null_total_var) if null_total_var > 0 else np.nan
+            else:
+                explained_var = np.nan
+            
+            # Store variance components from model
+            variance_components[dep_var].update({
+                'full_between_var': between_var,
+                'full_within_var': within_var,
+                'full_icc': icc,
+                'explained_var': explained_var
+            })
+            
+            # Create summary
+            coef_df = pd.DataFrame({
+                'Coefficient': mixed_fit.params,
+                'Std Error': mixed_fit.bse,
+                'z': mixed_fit.tvalues,
+                'P>|z|': mixed_fit.pvalues,
+                'CI 2.5%': mixed_fit.conf_int()[0],
+                'CI 97.5%': mixed_fit.conf_int()[1]
+            })
+            
+            # Add significance indicators
+            coef_df['Significance'] = coef_df['P>|z|'].apply(lambda p: 
+                                                       '***' if p < 0.001 else
+                                                       '**' if p < 0.01 else
+                                                       '*' if p < 0.05 else
+                                                       '.' if p < 0.1 else '')
+            
+            # Categorize parameters as within or between effects
+            coef_df['Effect_Type'] = coef_df.index.map(
+                lambda x: 'Within-Subject' if x == 'IsGreen' 
+                        else 'Intercept' if x == 'Intercept' 
+                        else 'Other'
+            )
+            
+            # Store model and summary
+            all_models[dep_var] = mixed_fit
+            model_summaries[dep_var] = {
+                'coefficients': coef_df,
+                'formula': simplified_formula,
+                'n_obs': len(model_data),
+                'n_participants': model_data['ParticipantID'].nunique(),
+                'n_with_multiple': participants_with_multiple,
+                'log_likelihood': mixed_fit.llf,
+                'aic': mixed_fit.aic,
+                'bic': mixed_fit.bic
             }
             
-            decomp_models[dep_var] = effect_size_stats
+            # Print key results
+            print(f"  Simplified mixed model results:")
+            print(f"    IsGreen effect (within-subject): {mixed_fit.params['IsGreen']:.3f}, p-value: {mixed_fit.pvalues['IsGreen']:.4f}")
+            print(f"    Model fit: AIC = {mixed_fit.aic:.1f}, BIC = {mixed_fit.bic:.1f}")
+            print(f"    Within-participant variance explained: {explained_var*100:.1f}%" if not np.isnan(explained_var) else "    Within-participant variance explained: NA")
             
-            # Print effect size
-            sig = "***" if standard_fit and standard_fit.pvalues['IsGreen'] < 0.001 else "**" if standard_fit and standard_fit.pvalues['IsGreen'] < 0.01 else "*" if standard_fit and standard_fit.pvalues['IsGreen'] < 0.05 else "." if standard_fit and standard_fit.pvalues['IsGreen'] < 0.1 else ""
-            print(f"  Effect size statistics:")
-            print(f"    Raw mean difference: {mean_diff:.3f} {sig}")
-            print(f"    Cohen's d: {cohens_d:.3f}")
+        except Exception as e:
+            print(f"  Error fitting simplified mixed model: {str(e)}")
+            mixed_fit = None
+    
+    # 2. Fit separate between-subject model (using participant means)
+    try:
+        # Create dataframe of participant means
+        between_data = model_data.groupby('ParticipantID').agg({
+            dep_var: 'mean',
+            'IsGreen': 'mean'  # This will be proportion of green trials (usually 0.5 with 2 observations)
+        })
+        
+        # Add green type if applicable
+        if 'GreenType' in model_data.columns:
+            # Most common green type by participant
+            between_data['GreenType'] = model_data.groupby('ParticipantID')['GreenType'].apply(
+                lambda x: x.mode()[0] if len(x.mode()) > 0 else None
+            )
             
-            # Store summary statistics
-            decomp_summaries[dep_var] = {
-                'mean_diff': mean_diff,
-                'sd_diff': sd_diff,
-                'se_diff': se_diff,
-                'cohens_d': cohens_d,
-                'n': len(within_df)
-            }
-
-    return standard_fit
+            # Add IsTree indicator
+            between_data['IsTree'] = between_data['GreenType'].map(lambda x: 1 if x == 'Trees' else 0)
+        
+        # Add participant-level covariates (means of variables)
+        for cov in valid_covariates:
+            if cov not in ['ParticipantID', 'ExperimentID', 'IsGreen']:
+                between_data[cov] = model_data.groupby('ParticipantID')[cov].mean()
+        
+        # Create formula for between-subject model
+        # Keep it simple with a minimal set of covariates
+        between_formula = f"{dep_var} ~ IsGreen"
+        
+        # Add GreenType interaction if available
+        if 'GreenType' in between_data.columns:
+            between_formula += " * IsTree"
+        
+        # Add a few key covariates only
+        covariate_terms = [cov for cov in valid_covariates if cov != 'ParticipantID']
+        if covariate_terms:
+            between_formula += " + " + " + ".join(covariate_terms)
+        
+        print(f"  Between-subject formula: {between_formula}")
+        
+        # Fit between-subject model
+        between_model = smf.ols(between_formula, between_data).fit()
+        
+        # Create summary
+        between_coef_df = pd.DataFrame({
+            'Coefficient': between_model.params,
+            'Std Error': between_model.bse,
+            't': between_model.tvalues,
+            'P>|t|': between_model.pvalues,
+            'CI 2.5%': between_model.conf_int()[0],
+            'CI 97.5%': between_model.conf_int()[1]
+        })
+        
+        # Add significance indicators
+        between_coef_df['Significance'] = between_coef_df['P>|t|'].apply(lambda p: 
+                                                                    '***' if p < 0.001 else
+                                                                    '**' if p < 0.01 else
+                                                                    '*' if p < 0.05 else
+                                                                    '.' if p < 0.1 else '')
+        
+        # Store between-subject model and summary
+        decomp_models[f"{dep_var}_between"] = between_model
+        decomp_summaries[f"{dep_var}_between"] = {
+            'coefficients': between_coef_df,
+            'formula': between_formula,
+            'n_obs': len(between_data),
+            'r_squared': between_model.rsquared,
+            'r_squared_adj': between_model.rsquared_adj,
+            'f_statistic': between_model.fvalue,
+            'f_pvalue': between_model.f_pvalue
+        }
+        
+        # Print key results
+        print(f"  Between-subject model results:")
+        print(f"    IsGreen proportion effect: {between_model.params.get('IsGreen', np.nan):.3f}, p-value: {between_model.pvalues.get('IsGreen', np.nan):.4f}")
+        if 'IsGreen:IsTree' in between_model.params:
+            print(f"    IsGreen x Trees interaction: {between_model.params['IsGreen:IsTree']:.3f}, p-value: {between_model.pvalues['IsGreen:IsTree']:.4f}")
+        print(f"    Model fit: R² = {between_model.rsquared:.3f}, Adj. R² = {between_model.rsquared_adj:.3f}")
+        
+    except Exception as e:
+        print(f"  Error fitting between-subject model: {str(e)}")
+    
+    return mixed_fit
 
 # Run mixed effects models for each dependent variable
 for dep_var in dep_vars:
@@ -438,25 +590,22 @@ def create_within_subject_plot(data, dep_var):
         plt.text(0, ctrl_mean, f"{ctrl_mean:.2f}±{ctrl_se:.2f}", ha='right', va='bottom')
         plt.text(1, green_mean, f"{green_mean:.2f}±{green_se:.2f}", ha='left', va='bottom')
         
-        # Get the standard model and effect size stats
-        standard_model = all_models.get(dep_var)
-        effect_stats = decomp_models.get(dep_var)
+        # Get the mixed effects model
+        model = all_models.get(dep_var)
         
         # Build title with model effects
         title_parts = [f"Within-subject Effect of Green Environment on {dep_var}"]
         
         # Add mixed model effect if available
-        if standard_model is not None and 'IsGreen' in standard_model.params:
-            effect = standard_model.params['IsGreen']
-            p_value = standard_model.pvalues['IsGreen']
+        if model is not None and 'IsGreen' in model.params:
+            effect = model.params['IsGreen']
+            p_value = model.pvalues['IsGreen']
             sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "." if p_value < 0.1 else ""
             title_parts.append(f"Mixed Model Effect: {effect:.3f} {sig} (p={p_value:.4f})")
         
-        # Add effect size if available
-        if effect_stats is not None and 'cohens_d' in effect_stats:
-            mean_diff = effect_stats['mean_diff']
-            d = effect_stats['cohens_d']
-            title_parts.append(f"Cohen's d = {d:.2f}, Raw Difference = {mean_diff:.3f}")
+            # Add raw difference for context (but not standardized)
+            raw_diff = green_mean - ctrl_mean
+            title_parts.append(f"Raw Mean Difference: {raw_diff:.3f}")
         
         plt.title('\n'.join(title_parts))
     
@@ -525,13 +674,16 @@ for dep_var in dep_vars:
 # Create summary Excel file
 with pd.ExcelWriter('results/mixed_effects_results.xlsx', engine='openpyxl') as writer:
     
+    # Add a test sheet to ensure we have at least one valid sheet
+    pd.DataFrame({'Test': ['This is a test sheet']}).to_excel(writer, sheet_name='Test', index=False)
+    
     # Create a summary sheet for all models
     summary_rows = []
     for dep_var in dep_vars:
         if dep_var in all_models:
             # Get model results
             standard_model = all_models[dep_var]
-            effect_stats = decomp_models.get(dep_var)
+            between_model = decomp_models.get(f"{dep_var}_between")
             vc = variance_components.get(dep_var, {})
             
             # Initialize row with basic information
@@ -563,42 +715,77 @@ with pd.ExcelWriter('results/mixed_effects_results.xlsx', engine='openpyxl') as 
                     'IsGreen 95% CI Upper': ci_upper
                 })
             
-            # Add effect size statistics if available
-            if effect_stats is not None and 'cohens_d' in effect_stats:
-                mean_diff = effect_stats['mean_diff']
-                sd_diff = effect_stats['sd_diff']
-                se_diff = effect_stats['se_diff']
-                cohens_d = effect_stats['cohens_d']
-                n = effect_stats['n']
+            # Add interaction effects from mixed model
+            for param in standard_model.params.index:
+                if 'IsGreen:C(GreenType' in param:
+                    effect_size = standard_model.params[param]
+                    p_value = standard_model.pvalues[param]
+                    ci_lower = standard_model.conf_int().loc[param, 0]
+                    ci_upper = standard_model.conf_int().loc[param, 1]
+                    
+                    # Clean parameter name
+                    clean_param = param.replace('IsGreen:C(GreenType)', 'IsGreen x GreenType')
+                    
+                    # Determine significance indicator
+                    sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "." if p_value < 0.1 else ""
+                    
+                    row.update({
+                        f'{clean_param} Effect': effect_size,
+                        f'{clean_param} P-value': p_value,
+                        f'{clean_param} Sig': sig
+                    })
+            
+            # Add between-subject model results if available
+            if between_model is not None:
+                if hasattr(between_model, 'params') and 'IsGreen' in between_model.params:
+                    between_effect = between_model.params['IsGreen']
+                    between_p = between_model.pvalues['IsGreen']
+                    between_sig = "***" if between_p < 0.001 else "**" if between_p < 0.01 else "*" if between_p < 0.05 else "." if between_p < 0.1 else ""
+                    
+                    row.update({
+                        'Between IsGreen Effect': between_effect,
+                        'Between IsGreen P-value': between_p,
+                        'Between IsGreen Sig': between_sig
+                    })
                 
-                # Calculate t-value and p-value
-                t_value = mean_diff / se_diff if se_diff > 0 else np.nan
-                p_value = 2 * (1 - scipy.stats.t.cdf(abs(t_value), n-1)) if not np.isnan(t_value) else np.nan
+                # Add interaction term from between-subject model
+                if hasattr(between_model, 'params') and 'IsGreen:GreenType' in between_model.params:
+                    interact_effect = between_model.params['IsGreen:GreenType']
+                    interact_p = between_model.pvalues['IsGreen:GreenType']
+                    interact_sig = "***" if interact_p < 0.001 else "**" if interact_p < 0.01 else "*" if interact_p < 0.05 else "." if interact_p < 0.1 else ""
+                    
+                    row.update({
+                        'Between IsGreen x GreenType Effect': interact_effect,
+                        'Between IsGreen x GreenType P-value': interact_p,
+                        'Between IsGreen x GreenType Sig': interact_sig
+                    })
                 
-                sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "." if p_value < 0.1 else ""
-                
-                row.update({
-                    'Raw Mean Diff': mean_diff,
-                    'SD of Diff': sd_diff,
-                    'SE of Diff': se_diff,
-                    'Cohens d': cohens_d,
-                    't-value': t_value,
-                    'Paired P-value': p_value,
-                    'Paired Sig': sig
-                })
+                # Add model fit statistics
+                if hasattr(between_model, 'rsquared'):
+                    row.update({
+                            'Between R-squared': between_model.rsquared,
+                            'Between Adj R-squared': between_model.rsquared_adj
+                    })
             
             # Add all covariate effects from standard model to the row
             for cov in standard_model.params.index:
-                if cov != 'Intercept' and cov != 'IsGreen' and not cov.endswith('_between'):
+                if cov != 'Intercept' and cov != 'IsGreen' and not 'IsGreen:C(GreenType' in cov:
+                    # Skip GreenType main effects for clarity
+                    if cov.startswith('C(GreenType'):
+                        continue
+                        
+                    effect_type = 'Within' if cov.endswith('_c') else 'Between' if cov.endswith('_c') else 'Other'
+                    cov_clean = cov.replace('_c', '')
+                    
                     effect_size = standard_model.params[cov]
                     p_value = standard_model.pvalues[cov]
                     
                     sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else "." if p_value < 0.1 else ""
                     
                     row.update({
-                        f'{cov} Effect': effect_size,
-                        f'{cov} P-value': p_value,
-                        f'{cov} Sig': sig
+                        f'{effect_type} {cov_clean} Effect': effect_size,
+                        f'{effect_type} {cov_clean} P-value': p_value,
+                        f'{effect_type} {cov_clean} Sig': sig
                     })
             
             summary_rows.append(row)
@@ -610,92 +797,106 @@ with pd.ExcelWriter('results/mixed_effects_results.xlsx', engine='openpyxl') as 
             summary_df = summary_df.sort_values(['IsGreen P-value'])
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
     
-    # Create detailed sheets for each model
-    for dep_var, model in all_models.items():
-        if model is not None and dep_var in model_summaries:
-            # Clean sheet name
-            safe_name = f"{dep_var[:20]}_model"
+    # Create one sheet per dependent variable with all model results
+    for i, dep_var in enumerate(dep_vars):
+        if dep_var in all_models:
+            # Use simple sheet names to avoid any issues
+            safe_name = f"Var{i+1}"
             
-            # Get coefficient table
-            coef_df = model_summaries[dep_var]['coefficients']
+            # Create a combined results dataframe for this variable
+            results_data = []
             
-            # Write coefficients
-            coef_df.to_excel(writer, sheet_name=safe_name, index=True, startrow=0)
+            # Add header/title
+            results_data.append(["Results for " + dep_var, "", "", "", ""])
+            results_data.append(["", "", "", "", ""])  # Empty row for spacing
             
-            # Create diagnostics DataFrame
-            diagnostics = pd.DataFrame({
-                'Metric': [
-                    'Dependent Variable',
-                    'Formula',
-                    'Observations',
-                    'Participants',
-                    'ICC',
-                    'Between-participant Variance',
-                    'Within-participant Variance',
-                    'Variance Explained (%)',
-                    'Log-Likelihood',
-                    'AIC',
-                    'BIC'
-                ],
-                'Value': [
-                    dep_var,
-                    model_summaries[dep_var]['formula'],
-                    model_summaries[dep_var]['n_obs'],
-                    model_summaries[dep_var]['n_participants'],
-                    variance_components.get(dep_var, {}).get('full_icc', np.nan),
-                    variance_components.get(dep_var, {}).get('full_between_var', np.nan),
-                    variance_components.get(dep_var, {}).get('full_within_var', np.nan),
-                    variance_components.get(dep_var, {}).get('explained_var', np.nan) * 100 if dep_var in variance_components and 'explained_var' in variance_components[dep_var] else np.nan,
-                    model_summaries[dep_var].get('log_likelihood', np.nan),
-                    model_summaries[dep_var].get('aic', np.nan),
-                    model_summaries[dep_var].get('bic', np.nan)
-                ]
-            })
+            # Add variance components
+            vc = variance_components.get(dep_var, {})
+            results_data.append(["Variance Components", "", "", "", ""])
+            results_data.append(["ICC", vc.get('full_icc', np.nan), "", "", ""])
+            results_data.append(["Between-subject Variance", vc.get('full_between_var', np.nan), "", "", ""])
+            results_data.append(["Within-subject Variance", vc.get('full_within_var', np.nan), "", "", ""])
+            results_data.append(["Variance Explained (%)", vc.get('explained_var', np.nan) * 100 if 'explained_var' in vc else np.nan, "", "", ""])
+            results_data.append(["", "", "", "", ""])  # Empty row for spacing
             
-            # Write diagnostics below coefficients
-            diagnostics.to_excel(writer, sheet_name=safe_name, index=False, startrow=len(coef_df) + 3)
+            # Add mixed model results
+            mixed_model = all_models[dep_var]
+            results_data.append(["Mixed Effects Model Results", "", "", "", ""])
+            results_data.append(["Formula", model_summaries[dep_var]['formula'], "", "", ""])
+            results_data.append(["Observations", model_summaries[dep_var]['n_obs'], "", "", ""])
+            results_data.append(["Participants", model_summaries[dep_var]['n_participants'], "", "", ""])
+            results_data.append(["Log-Likelihood", model_summaries[dep_var].get('log_likelihood', np.nan), "", "", ""])
+            results_data.append(["AIC", model_summaries[dep_var].get('aic', np.nan), "", "", ""])
+            results_data.append(["BIC", model_summaries[dep_var].get('bic', np.nan), "", "", ""])
+            results_data.append(["", "", "", "", ""])  # Empty row for spacing
+            
+            # Add mixed model coefficients (sorted by effect type)
+            coef_df = model_summaries[dep_var]['coefficients'].copy()
+            if 'Effect_Type' in coef_df.columns:
+                effect_type_order = {'Intercept': 0, 'Within-Subject': 1, 'Between-Subject': 2, 'Other': 3}
+                coef_df['sort_order'] = coef_df['Effect_Type'].map(effect_type_order)
+                coef_df = coef_df.sort_values('sort_order')
+                coef_df = coef_df.drop(columns=['sort_order'])
+            
+            # Convert coefficients to rows
+            results_data.append(["Mixed Model Coefficients", "", "", "", ""])
+            results_data.append(["Parameter", "Coefficient", "Std Error", "P>|z|", "Significance"])
+            
+            for idx, row in coef_df.iterrows():
+                results_data.append([
+                    idx, 
+                    row['Coefficient'], 
+                    row['Std Error'],
+                    row['P>|z|'],
+                    row['Significance']
+                ])
+            
+            results_data.append(["", "", "", "", ""])  # Empty row for spacing
+            
+            # Add between-subject model results if available
+            between_model = decomp_models.get(f"{dep_var}_between")
+            if between_model is not None and hasattr(between_model, 'params'):
+                between_summary = decomp_summaries.get(f"{dep_var}_between")
+                
+                results_data.append(["Between-Subject Model Results", "", "", "", ""])
+                if between_summary:
+                    results_data.append(["Formula", between_summary.get('formula', ""), "", "", ""])
+                    results_data.append(["Observations", between_summary.get('n_obs', np.nan), "", "", ""])
+                    results_data.append(["R-squared", between_summary.get('r_squared', np.nan), "", "", ""])
+                    results_data.append(["Adjusted R-squared", between_summary.get('r_squared_adj', np.nan), "", "", ""])
+                    results_data.append(["F-statistic", between_summary.get('f_statistic', np.nan), "", "", ""])
+                    results_data.append(["F p-value", between_summary.get('f_pvalue', np.nan), "", "", ""])
+                    results_data.append(["", "", "", "", ""])  # Empty row for spacing
+                
+                # If we have coefficients
+                if between_summary and 'coefficients' in between_summary:
+                    between_coef_df = between_summary['coefficients']
+                    
+                    # Convert coefficients to rows
+                    results_data.append(["Between-Subject Model Coefficients", "", "", "", ""])
+                    results_data.append(["Parameter", "Coefficient", "Std Error", "P>|t|", "Significance"])
+                    
+                    for idx, row in between_coef_df.iterrows():
+                        results_data.append([
+                            idx, 
+                            row['Coefficient'], 
+                            row['Std Error'],
+                            row['P>|t|'] if 'P>|t|' in row else row.get('P>|z|', np.nan),
+                            row['Significance']
+                        ])
+            
+            # Convert to DataFrame and write to Excel
+            results_df = pd.DataFrame(results_data)
+            results_df.to_excel(writer, sheet_name=safe_name, header=False, index=False)
     
-    # Create detailed sheets for effect size statistics
-    for dep_var, effect_stats in decomp_models.items():
-        if effect_stats is not None:
-            # Clean sheet name
-            safe_name = f"{dep_var[:20]}_effect"
-            
-            # Calculate t-value and p-value
-            mean_diff = effect_stats['mean_diff']
-            se_diff = effect_stats['se_diff']
-            n = effect_stats['n']
-            t_value = mean_diff / se_diff if se_diff > 0 else np.nan
-            p_value = 2 * (1 - scipy.stats.t.cdf(abs(t_value), n-1)) if not np.isnan(t_value) else np.nan
-            
-            # Create effect size statistics table
-            effect_df = pd.DataFrame({
-                'Metric': [
-                    'Dependent Variable',
-                    'Mean Difference (Green - Control)',
-                    'Standard Deviation of Differences',
-                    'Standard Error of Mean Difference',
-                    't-value',
-                    'p-value',
-                    'Degrees of Freedom',
-                    'Cohen\'s d',
-                    'n'
-                ],
-                'Value': [
-                    dep_var,
-                    mean_diff,
-                    effect_stats['sd_diff'],
-                    se_diff,
-                    t_value,
-                    p_value,
-                    n-1,
-                    effect_stats['cohens_d'],
-                    n
-                ]
-            })
-            
-            # Write effect size statistics
-            effect_df.to_excel(writer, sheet_name=safe_name, index=False, startrow=0)
+    # Add a mapping sheet that shows which variable is in which sheet
+    var_mapping = []
+    for i, dep_var in enumerate(dep_vars):
+        if dep_var in all_models:
+            var_mapping.append({'Sheet': f"Var{i+1}", 'Variable': dep_var})
+    
+    if var_mapping:
+        pd.DataFrame(var_mapping).to_excel(writer, sheet_name='VariableMap', index=False)
 
 print("\nAnalysis complete. Results saved to results/mixed_effects_results.xlsx")
 print("Visualizations saved to the 'visualizations' directory") 
