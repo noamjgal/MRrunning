@@ -1,40 +1,52 @@
 import pandas as pd
 import numpy as np
 import statsmodels.formula.api as smf
+import statsmodels.api as sm
 import os
-import warnings
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
-from scipy import stats
+import warnings
 
-# Suppress warnings to keep output clean
+# Suppress warnings
 warnings.filterwarnings('ignore')
 
 # Create directory for results
 os.makedirs('results', exist_ok=True)
 
-# Load and prepare data
+# Load data
 print("Loading data...")
 df = pd.read_csv('data/Combined_Joined_Data.csv')
 
-# Print original columns for debugging
-print("Available columns:")
-print(df.columns.tolist())
+# Print columns for reference
+print("\nAvailable columns:")
+columns_list = df.columns.tolist()
+print(columns_list)
 
-# Rename columns to match R naming convention
-df = df.rename(columns={
+# Define column mappings with correct names from the data
+column_mappings = {
+    # Basic info columns
     'experiment ID (participant number_condition)': 'ExperimentID',
-    'Past exepriences with XR': 'MRExperience_num',
     'participant number': 'ParticipantID',
     'condition': 'Condition_num',
     'run order': 'RunOrder_num',
+    'Past exepriences with XR': 'MRExperience_num',
+    'Gender': 'Gender_num',
+    'Age': 'Age',
+    'VO2max': 'VO2max',
+    'avg_close_to_skin_temp': 'AvgSkinTemp',
+    'min_heart_rate': 'MinHR',
+    'Average heart rate (bpm)': 'AvgHR',
+    'Recalculated_Speed_km_per_h': 'Speed_kmh',
+    'Duration_seconds': 'Duration_s',
+    
+    # Key measure columns with correct names from the data
     'RPE': 'RPE',
     'Satisfaction': 'Satisfaction',
     'Enjoyment': 'Enjoyment',
     'Challenging': 'Challenging',
     'Concentration': 'Concentration',
-    'Feeling of presence': 'Presence',
+    'Feeling of presence': 'Presence', 
     'Ability to move freely': 'MoveFreely',
     'Fatigue': 'Fatigue',
     'Exhaustion': 'Exhaustion',
@@ -56,397 +68,325 @@ df = df.rename(columns={
     'Ability to do things': 'AbilityToDo',
     'Identification': 'Identification',
     'Greenes of the environment': 'PerceivedGreenness',
-    'Sense of belonging': 'Belonging',
-    'Gender': 'Gender_num',
-    'Average heart rate (bpm)': 'AvgHR',
-    'Total distance (km)': 'TotalDistance_km_char',
-    'Average speed (km/h)': 'AvgSpeed_kmh_char',
-    'Max speed (km/h)': 'MaxSpeed_kmh_char',
-    'Average pace (min/km)': 'AvgPace_char',
-    'Max pace (min/km)': 'MaxPace_char',
-    'Fat percentage of calories(%)': 'FatPercentage',
-    'Carbohydrate percentage of calories(%)': 'CarbPercentage',
-    'Protein percentage of calories(%)': 'ProteinPercentage',
-    'Average cadence (rpm)': 'AvgCadence',
-    'Average stride length (cm)': 'AvgStrideLength',
-    'Running index': 'RunningIndex',
-    'Training load': 'TrainingLoad',
-    'Ascent (m)': 'Ascent_m',
-    'Descent (m)': 'Descent_m',
-    'Average power (W)': 'AvgPower',
-    'Max power (W)': 'MaxPower',
-    'Duration_seconds': 'Duration_s',
-    'Recalculated_Pace_min_per_km': 'Pace_minkm',
-    'Recalculated_Speed_km_per_h': 'Speed_kmh',
-    'min_heart_rate': 'MinHR',
-    'avg_close_to_skin_temp': 'AvgSkinTemp'
-})
+    'Sense of belonging': 'Belonging'
+}
+
+# Only rename columns that actually exist in the data
+rename_dict = {k: v for k, v in column_mappings.items() if k in df.columns}
+df = df.rename(columns=rename_dict)
+
+# Print renamed columns for reference
+print("\nRenamed columns:")
+print(df.columns.tolist())
 
 # Convert numeric columns to float
-numeric_columns = [
-    'RPE', 'Satisfaction', 'Enjoyment', 'Challenging', 'Concentration', 
-    'Presence', 'MoveFreely', 'Fatigue', 'Exhaustion', 'Sluggish', 
-    'LightWeighted', 'Relaxation', 'Curiosity', 'OrderInSpace', 
-    'EasyNavigation', 'ComfortableEnv', 'Tense', 'Anxious', 'Healthy', 
-    'Angry', 'Irritated', 'Immersed', 'PhysicallyPresent', 'UseObjects', 
-    'AbilityToDo', 'Identification', 'PerceivedGreenness', 'Belonging',
-    'Duration_s', 'Speed_kmh', 'MinHR', 'AvgHR', 'VO2max', 'AvgSkinTemp',
-    'Age', 'MRExperience_num', 'Gender_num', 'RunOrder_num'
-]
+numeric_columns = [col for col in df.columns if col in set(column_mappings.values())]
+print(f"\nProcessing {len(numeric_columns)} numeric columns.")
 
 for col in numeric_columns:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-# Create condition variables
-df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
+# Ensure Condition_num is numeric
+if 'Condition_num' in df.columns:
+    df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
+else:
+    print("ERROR: Condition_num column not found!")
+    exit(1)
 
-# Create main experimental variables
-df['IsGreen'] = (df['Condition_num'] > 0).astype(int)  # 1 if any green, 0 if control
-df['IsShrub'] = (df['Condition_num'] == 1).astype(int)  # 1 if shrub, 0 otherwise
-df['IsTree'] = (df['Condition_num'] == 2).astype(int)   # 1 if tree, 0 otherwise
+print("\nAssigning participants to experimental groups...")
+# Determine if a participant was in tree group (1) or shrub group (0)
+participant_groups = {}
 
-# Create interaction variables
-df['Green_Shrub'] = df['IsGreen'] * df['IsShrub']  # 1 if shrub, 0 otherwise
-df['Green_Tree'] = df['IsGreen'] * df['IsTree']    # 1 if tree, 0 otherwise
+# For each participant, check their condition assignments
+for participant_id in df['ParticipantID'].unique():
+    participant_data = df[df['ParticipantID'] == participant_id]
+    
+    # Check if they have tree runs (condition 2)
+    has_tree_runs = (participant_data['Condition_num'] == 2).any()
+    
+    # Check if they have shrub runs (condition 1)
+    has_shrub_runs = (participant_data['Condition_num'] == 1).any()
+    
+    # Assign group (1 for tree group, 0 for shrub group)
+    if has_tree_runs and not has_shrub_runs:
+        participant_groups[participant_id] = 1  # Tree group
+    elif has_shrub_runs and not has_tree_runs:
+        participant_groups[participant_id] = 0  # Shrub group
+    else:
+        if has_tree_runs and has_shrub_runs:
+            print(f"  Warning: Participant {participant_id} has both tree and shrub runs. Assigning to tree group.")
+            participant_groups[participant_id] = 1
+        else:
+            print(f"  Warning: Participant {participant_id} has neither tree nor shrub runs. Assigning to shrub group.")
+            participant_groups[participant_id] = 0
+
+# Create RunGroupType column (Tree=1, Shrub=0)
+df['RunGroupType'] = df['ParticipantID'].map(participant_groups)
+
+# Create green condition indicator (1=green, 0=control)
+df['IsGreen'] = (df['Condition_num'] > 0).astype(int)
+
+# Create interaction term
+df['IsGreen_RunGroupType'] = df['IsGreen'] * df['RunGroupType']
 
 # Print condition counts
 print("\nCondition counts:")
-print(df['Condition_num'].value_counts().sort_index())
-print("\nIsGreen counts:")
-print(df['IsGreen'].value_counts())
-print("\nGreen type counts:")
-print("Shrubs:", df['IsShrub'].sum())
-print("Trees:", df['IsTree'].sum())
+print(f"Condition_num:\n{df['Condition_num'].value_counts().sort_index()}")
+print(f"\nIsGreen (1=green, 0=control):\n{df['IsGreen'].value_counts()}")
+print(f"\nRunGroupType (1=tree group, 0=shrub group):\n{df['RunGroupType'].value_counts()}")
 
-# Calculate composite variables 
+# Calculate composite variables only if all required columns exist
+print("\nCalculating composite variables...")
+
+# Presence composite - check if columns exist
 presence_items = ['Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo']
-df['Presence_Avg'] = df[presence_items].mean(axis=1)
+available_presence = [col for col in presence_items if col in df.columns]
+if len(available_presence) > 0:
+    print(f"Creating Presence_Avg from {len(available_presence)} items: {available_presence}")
+    df['Presence_Avg'] = df[available_presence].mean(axis=1)
+else:
+    print("Warning: No presence items found, skipping Presence_Avg")
+    # Create a dummy column to avoid errors
+    df['Presence_Avg'] = np.nan
 
-# Create composite variables for analysis
+# Perceived Restorativeness Scale
 prs_items = ['Relaxation', 'Curiosity', 'OrderInSpace', 'EasyNavigation', 'ComfortableEnv']
-df['PRS_Avg'] = df[prs_items].mean(axis=1)
+available_prs = [col for col in prs_items if col in df.columns]
+if len(available_prs) > 0:
+    print(f"Creating PRS_Avg from {len(available_prs)} items: {available_prs}")
+    df['PRS_Avg'] = df[available_prs].mean(axis=1)
+else:
+    print("Warning: No PRS items found, skipping PRS_Avg")
+    df['PRS_Avg'] = np.nan
 
+# Place Attachment
 pa_items = ['Identification', 'Belonging']
-df['PlaceAttach_Avg'] = df[pa_items].mean(axis=1)
+available_pa = [col for col in pa_items if col in df.columns]
+if len(available_pa) > 0:
+    print(f"Creating PlaceAttach_Avg from {len(available_pa)} items: {available_pa}")
+    df['PlaceAttach_Avg'] = df[available_pa].mean(axis=1)
+else:
+    print("Warning: No Place Attachment items found, skipping PlaceAttach_Avg")
+    df['PlaceAttach_Avg'] = np.nan
 
+# Positive Affect
 positive_affect_items = ['Enjoyment', 'Satisfaction', 'Healthy', 'LightWeighted']
-df['PositiveAffect_Avg'] = df[positive_affect_items].mean(axis=1)
+available_pos = [col for col in positive_affect_items if col in df.columns]
+if len(available_pos) > 0:
+    print(f"Creating PositiveAffect_Avg from {len(available_pos)} items: {available_pos}")
+    df['PositiveAffect_Avg'] = df[available_pos].mean(axis=1)
+else:
+    print("Warning: No Positive Affect items found, skipping PositiveAffect_Avg")
+    df['PositiveAffect_Avg'] = np.nan
 
+# Negative Affect
 negative_affect_items = ['Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish']
-df['NegativeAffect_Avg'] = df[negative_affect_items].mean(axis=1)
+available_neg = [col for col in negative_affect_items if col in df.columns]
+if len(available_neg) > 0:
+    print(f"Creating NegativeAffect_Avg from {len(available_neg)} items: {available_neg}")
+    df['NegativeAffect_Avg'] = df[available_neg].mean(axis=1)
+else:
+    print("Warning: No Negative Affect items found, skipping NegativeAffect_Avg")
+    df['NegativeAffect_Avg'] = np.nan
 
-# Define dependent variables
-dep_vars = ['PRS_Avg', 'PlaceAttach_Avg', 'PositiveAffect_Avg', 'NegativeAffect_Avg', 
-            'Duration_s', 'RPE', 'Enjoyment', 'Satisfaction', 'Relaxation', 'Healthy', 'LightWeighted', 
-            'Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish', 'Concentration', 'MoveFreely', 'Exhaustion', 
-            'Presence', 'Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo',
-            'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR']
+# Define all potential dependent variables
+potential_dep_vars = [
+    'PRS_Avg', 'PlaceAttach_Avg', 'PositiveAffect_Avg', 'NegativeAffect_Avg', 
+    'Duration_s', 'RPE', 'Enjoyment', 'Satisfaction', 'Relaxation', 'Healthy', 'LightWeighted', 
+    'Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish', 'Concentration', 'MoveFreely', 'Exhaustion', 
+    'Presence', 'Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo',
+    'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR'
+]
 
-# Define covariates - exact list as specified
-covariates = ['RunOrder_num', 'Age', 'Gender_num', 'VO2max', 'AvgSkinTemp', 'Presence_Avg']
+# Filter to only include variables that exist in the data
+dep_vars = [var for var in potential_dep_vars if var in df.columns]
+print(f"\nAnalyzing {len(dep_vars)} dependent variables: {dep_vars}")
 
-# Remove any rows with missing values in key columns
+# Define potential covariates
+potential_covariates = ['RunOrder_num', 'Age', 'Gender_num', 'VO2max', 'AvgSkinTemp', 'Presence_Avg']
+
+# Filter to only include covariates that exist in the data
+covariates = [cov for cov in potential_covariates if cov in df.columns]
+print(f"Using {len(covariates)} covariates: {covariates}")
+
+# Remove rows with missing values in key columns
 df_original_count = len(df)
 df = df.dropna(subset=['ParticipantID', 'Condition_num'])
 df_filtered_count = len(df)
 
-print(f"\nFiltered data: {df_filtered_count} observations (removed {df_original_count - df_filtered_count} rows with missing ParticipantID or Condition_num)")
+print(f"\nFiltered data: {df_filtered_count} observations (removed {df_original_count - df_filtered_count} rows with missing data)")
 
-# Check if we have sufficient data for analysis
+# Check if we have sufficient data
 participant_counts = df.groupby('ParticipantID').size()
-print(f"\nParticipant observation counts:")
-print(participant_counts.value_counts())
-print(f"Total participants: {len(participant_counts)}")
+print(f"\nTotal participants: {len(participant_counts)}")
 print(f"Participants with ≥2 observations: {sum(participant_counts >= 2)}")
 
 # Storage for results
-all_models = {}
-model_summaries = {}
-model_coefficients = {}
+all_results = {}
 
-def run_regression_model(data, dep_var):
-    """
-    Run a standard OLS regression model with green condition and interactions,
-    using the specified covariates for all models.
-    """
+def get_significance_symbol(p_value):
+    """Return significance symbols based on p-value"""
+    if pd.isna(p_value):
+        return ''
+    if p_value < 0.001:
+        return '***'
+    elif p_value < 0.01:
+        return '**'
+    elif p_value < 0.05:
+        return '*'
+    elif p_value < 0.1:
+        return '.'
+    else:
+        return ''
+
+def run_mixed_model(data, dep_var):
+    """Run a linear mixed effects model"""
     print(f"\nAnalyzing {dep_var}")
     
-    # Prepare model data - don't include current DV if it's also a covariate
+    # Prepare model data
     model_data = data.dropna(subset=[dep_var]).copy()
     
-    # Filter covariates to exclude the current dependent variable
+    # Filter covariates to exclude current DV
     valid_covs = [cov for cov in covariates if cov != dep_var]
     
-    print(f"  Observations after removing NA: {len(model_data)}")
+    # Skip model if insufficient data
+    if len(model_data) < 10:
+        print(f"  Skipping: Not enough data (N={len(model_data)})")
+        return None
     
-    # Create formula for the regression model with interaction terms and all specified covariates
-    formula = f"{dep_var} ~ IsGreen + Green_Shrub + Green_Tree"
+    # Ensure ParticipantID is a string for grouping
+    model_data['ParticipantID'] = model_data['ParticipantID'].astype(str)
     
-    # Add all valid covariates
+    # Create formula - factorial design with covariates
+    formula = f"{dep_var} ~ IsGreen + RunGroupType + IsGreen:RunGroupType"
+    
+    # Add valid covariates if they have enough non-missing values
+    available_covs = []
     if valid_covs:
-        # Check which covariates are available in the data
         available_covs = [cov for cov in valid_covs if cov in model_data.columns 
-                          and model_data[cov].notna().sum() > 0.8 * len(model_data)]
+                         and model_data[cov].notna().sum() > 0.8 * len(model_data)]
         if available_covs:
             formula += " + " + " + ".join(available_covs)
     
-    print(f"  Using formula: {formula}")
+    print(f"  Formula: {formula}")
+    print(f"  N = {len(model_data)}, Participants = {model_data['ParticipantID'].nunique()}")
     
-    # Fit regression model
     try:
-        model = smf.ols(formula, model_data)
-        fit = model.fit()
+        # Run mixed model with random intercept for participant
+        model = smf.mixedlm(formula, model_data, groups=model_data["ParticipantID"])
+        fit = model.fit(reml=True)
         
-        # Extract all fixed effects coefficients
-        coefficients_df = pd.DataFrame({
-            'Parameter': fit.params.index,
-            'Coefficient': fit.params.values,
-            'Std_Error': fit.bse.values,
-            't_value': fit.tvalues.values,
-            'p_value': fit.pvalues.values,
-            'CI_2.5%': fit.conf_int()[0].values,
-            'CI_97.5%': fit.conf_int()[1].values
-        })
-        
-        # Add significance indicators
-        coefficients_df['Significance'] = coefficients_df['p_value'].apply(
-            lambda p: '***' if p < 0.001 else 
-                     '**' if p < 0.01 else 
-                     '*' if p < 0.05 else 
-                     '.' if p < 0.1 else ''
-        )
-        
-        # Extract main effects
+        # Extract key parameters
+        # IsGreen effect (effect in shrub group, the reference level)
         green_effect = fit.params.get('IsGreen', np.nan)
-        green_se = fit.bse.get('IsGreen', np.nan)
         green_p = fit.pvalues.get('IsGreen', np.nan)
-        green_ci_lower = fit.conf_int().loc['IsGreen', 0] if 'IsGreen' in fit.conf_int().index else np.nan
-        green_ci_upper = fit.conf_int().loc['IsGreen', 1] if 'IsGreen' in fit.conf_int().index else np.nan
+        green_se = fit.bse.get('IsGreen', np.nan)
         
-        # Extract shrub interaction effect
-        shrub_int_effect = fit.params.get('Green_Shrub', np.nan)
-        shrub_int_se = fit.bse.get('Green_Shrub', np.nan)
-        shrub_int_p = fit.pvalues.get('Green_Shrub', np.nan)
-        shrub_int_ci_lower = fit.conf_int().loc['Green_Shrub', 0] if 'Green_Shrub' in fit.conf_int().index else np.nan
-        shrub_int_ci_upper = fit.conf_int().loc['Green_Shrub', 1] if 'Green_Shrub' in fit.conf_int().index else np.nan
+        # RunGroupType effect (difference between tree and shrub groups)
+        group_effect = fit.params.get('RunGroupType', np.nan)
+        group_p = fit.pvalues.get('RunGroupType', np.nan)
+        group_se = fit.bse.get('RunGroupType', np.nan)
         
-        # Extract tree interaction effect
-        tree_int_effect = fit.params.get('Green_Tree', np.nan)
-        tree_int_se = fit.bse.get('Green_Tree', np.nan)
-        tree_int_p = fit.pvalues.get('Green_Tree', np.nan)
-        tree_int_ci_lower = fit.conf_int().loc['Green_Tree', 0] if 'Green_Tree' in fit.conf_int().index else np.nan
-        tree_int_ci_upper = fit.conf_int().loc['Green_Tree', 1] if 'Green_Tree' in fit.conf_int().index else np.nan
+        # Interaction effect (additional effect of IsGreen in the tree group)
+        interaction = fit.params.get('IsGreen:RunGroupType', np.nan)
+        interaction_p = fit.pvalues.get('IsGreen:RunGroupType', np.nan)
+        interaction_se = fit.bse.get('IsGreen:RunGroupType', np.nan)
+        
+        # Get random effects variance
+        random_var = float(fit.cov_re.iloc[0, 0])
+        residual_var = fit.scale
+        icc = random_var / (random_var + residual_var)
+        
+        # Calculate R-squared values for mixed models (simpler approach)
+        # Using the method from the 'performance' package in R
+        
+        # Calculate simplified R² values
+        total_var = model_data[dep_var].var()
+        residuals = model_data[dep_var] - fit.fittedvalues
+        residual_var_actual = np.var(residuals)
+        
+        # Marginal R² - fixed effects only
+        r2_marginal = 1 - (residual_var_actual / total_var)
+        
+        # Conditional R² - fixed + random effects 
+        # Note: This is an approximation
+        r2_conditional = 1 - (residual_var / total_var)
+        
+        # Make sure R² values are within bounds
+        r2_marginal = max(0, min(1, r2_marginal))
+        r2_conditional = max(0, min(1, r2_conditional))
+        
+        # Calculate AIC and BIC manually
+        # Count parameters: fixed effects + 1 for random intercept variance + 1 for residual variance
+        n_fixed_params = len(fit.params)
+        k = n_fixed_params + 2  # +2 for random intercept variance and residual variance
+        n = len(model_data)
+        loglik = fit.llf
+        aic = -2 * loglik + 2 * k
+        bic = -2 * loglik + k * np.log(n)
         
         # Get covariate effects
-        covariate_effects = {}
+        covariate_results = {}
         for cov in available_covs:
             if cov in fit.params:
-                covariate_effects[cov] = {
+                covariate_results[cov] = {
                     'coef': fit.params.get(cov, np.nan),
-                    'se': fit.bse.get(cov, np.nan),
-                    'p_value': fit.pvalues.get(cov, np.nan),
-                    'ci_lower': fit.conf_int().loc[cov, 0] if cov in fit.conf_int().index else np.nan,
-                    'ci_upper': fit.conf_int().loc[cov, 1] if cov in fit.conf_int().index else np.nan
+                    'p': fit.pvalues.get(cov, np.nan),
+                    'sig': get_significance_symbol(fit.pvalues.get(cov, np.nan))
                 }
-                # Add significance indicator
-                p_val = covariate_effects[cov]['p_value']
-                covariate_effects[cov]['significance'] = ('***' if p_val < 0.001 else 
-                                                         '**' if p_val < 0.01 else 
-                                                         '*' if p_val < 0.05 else 
-                                                         '.' if p_val < 0.1 else '')
         
-        # Calculate standardized effects
-        resid_sd = np.sqrt(fit.mse_resid)  # Root MSE = residual standard deviation
-        std_green_effect = green_effect / resid_sd
-        std_green_ci_lower = green_ci_lower / resid_sd
-        std_green_ci_upper = green_ci_upper / resid_sd
-        
-        std_shrub_int_effect = shrub_int_effect / resid_sd
-        std_shrub_int_ci_lower = shrub_int_ci_lower / resid_sd
-        std_shrub_int_ci_upper = shrub_int_ci_upper / resid_sd
-        
-        std_tree_int_effect = tree_int_effect / resid_sd
-        std_tree_int_ci_lower = tree_int_ci_lower / resid_sd
-        std_tree_int_ci_upper = tree_int_ci_upper / resid_sd
-        
-        # Calculate total effects for each condition type
-        # In the coding scheme, IsGreen=1 for both types, and the interaction terms add the differential effects
-        shrub_total_effect = green_effect + shrub_int_effect
-        tree_total_effect = green_effect + tree_int_effect
-        
-        # Calculate standard errors for total effects using delta method approximation
-        # For simplicity, we use the standard formula for the variance of a sum
-        shrub_total_se = np.sqrt(green_se**2 + shrub_int_se**2 + 2*fit.cov_params().loc['IsGreen', 'Green_Shrub'])
-        tree_total_se = np.sqrt(green_se**2 + tree_int_se**2 + 2*fit.cov_params().loc['IsGreen', 'Green_Tree'])
-        
-        # Calculate t-values and p-values for total effects
-        shrub_total_t = shrub_total_effect / shrub_total_se
-        tree_total_t = tree_total_effect / tree_total_se
-        
-        # Two-tailed p-value using t-distribution
-        df_residual = fit.df_resid
-        shrub_total_p = 2 * (1 - stats.t.cdf(abs(shrub_total_t), df_residual))
-        tree_total_p = 2 * (1 - stats.t.cdf(abs(tree_total_t), df_residual))
-        
-        # Calculate confidence intervals for total effects
-        t_critical = stats.t.ppf(0.975, df_residual)  # 95% CI
-        shrub_total_ci_lower = shrub_total_effect - t_critical * shrub_total_se
-        shrub_total_ci_upper = shrub_total_effect + t_critical * shrub_total_se
-        
-        tree_total_ci_lower = tree_total_effect - t_critical * tree_total_se
-        tree_total_ci_upper = tree_total_effect + t_critical * tree_total_se
-        
-        # Calculate standardized total effects
-        std_shrub_total_effect = shrub_total_effect / resid_sd
-        std_shrub_total_ci_lower = shrub_total_ci_lower / resid_sd
-        std_shrub_total_ci_upper = shrub_total_ci_upper / resid_sd
-        
-        std_tree_total_effect = tree_total_effect / resid_sd
-        std_tree_total_ci_lower = tree_total_ci_lower / resid_sd
-        std_tree_total_ci_upper = tree_total_ci_upper / resid_sd
-        
-        # Determine significance indicators
-        def get_significance(p_value):
-            if p_value < 0.001:
-                return '***'
-            elif p_value < 0.01:
-                return '**'
-            elif p_value < 0.05:
-                return '*'
-            elif p_value < 0.1:
-                return '.'
-            else:
-                return ''
-        
-        green_significance = get_significance(green_p)
-        shrub_int_significance = get_significance(shrub_int_p)
-        tree_int_significance = get_significance(tree_int_p)
-        shrub_total_significance = get_significance(shrub_total_p)
-        tree_total_significance = get_significance(tree_total_p)
-        
-        # Calculate model fit statistics
-        r2 = fit.rsquared
-        adj_r2 = fit.rsquared_adj
-        f_stat = fit.fvalue
-        f_pvalue = fit.f_pvalue
-        
-        # Create model summary
-        summary = {
-            'dep_var': dep_var,
+        # Create results dictionary
+        results = {
+            'n': len(model_data),
+            'participants': model_data['ParticipantID'].nunique(),
             'formula': formula,
-            'n_obs': len(model_data),
-            'n_participants': model_data['ParticipantID'].nunique(),
-            # Main green effect
-            'green_coef': green_effect,
-            'green_se': green_se,
+            'green_effect': green_effect,
             'green_p': green_p,
-            'green_ci_lower': green_ci_lower,
-            'green_ci_upper': green_ci_upper,
-            'green_std_effect': std_green_effect,
-            'green_std_ci_lower': std_green_ci_lower,
-            'green_std_ci_upper': std_green_ci_upper,
-            'green_significance': green_significance,
-            # Shrub interaction
-            'shrub_int_coef': shrub_int_effect,
-            'shrub_int_se': shrub_int_se,
-            'shrub_int_p': shrub_int_p,
-            'shrub_int_ci_lower': shrub_int_ci_lower,
-            'shrub_int_ci_upper': shrub_int_ci_upper,
-            'shrub_int_std_effect': std_shrub_int_effect,
-            'shrub_int_std_ci_lower': std_shrub_int_ci_lower,
-            'shrub_int_std_ci_upper': std_shrub_int_ci_upper,
-            'shrub_int_significance': shrub_int_significance,
-            # Tree interaction
-            'tree_int_coef': tree_int_effect,
-            'tree_int_se': tree_int_se,
-            'tree_int_p': tree_int_p,
-            'tree_int_ci_lower': tree_int_ci_lower,
-            'tree_int_ci_upper': tree_int_ci_upper,
-            'tree_int_std_effect': std_tree_int_effect,
-            'tree_int_std_ci_lower': std_tree_int_ci_lower,
-            'tree_int_std_ci_upper': std_tree_int_ci_upper,
-            'tree_int_significance': tree_int_significance,
-            # Total effects
-            'shrub_total_coef': shrub_total_effect,
-            'shrub_total_se': shrub_total_se,
-            'shrub_total_p': shrub_total_p,
-            'shrub_total_ci_lower': shrub_total_ci_lower,
-            'shrub_total_ci_upper': shrub_total_ci_upper,
-            'shrub_total_std_effect': std_shrub_total_effect,
-            'shrub_total_std_ci_lower': std_shrub_total_ci_lower, 
-            'shrub_total_std_ci_upper': std_shrub_total_ci_upper,
-            'shrub_total_significance': shrub_total_significance,
-            'tree_total_coef': tree_total_effect,
-            'tree_total_se': tree_total_se,
-            'tree_total_p': tree_total_p,
-            'tree_total_ci_lower': tree_total_ci_lower,
-            'tree_total_ci_upper': tree_total_ci_upper,
-            'tree_total_std_effect': std_tree_total_effect,
-            'tree_total_std_ci_lower': std_tree_total_ci_lower,
-            'tree_total_std_ci_upper': std_tree_total_ci_upper,
-            'tree_total_significance': tree_total_significance,
-            # Model fit statistics
-            'resid_sd': resid_sd,
-            'r2': r2,
-            'adj_r2': adj_r2,
-            'f_stat': f_stat,
-            'f_pvalue': f_pvalue,
-            'df_model': fit.df_model,
-            'df_resid': fit.df_resid,
-            'covariate_effects': covariate_effects
+            'green_sig': get_significance_symbol(green_p),
+            'group_effect': group_effect,
+            'group_p': group_p,
+            'group_sig': get_significance_symbol(group_p),
+            'interaction': interaction,
+            'interaction_p': interaction_p,
+            'interaction_sig': get_significance_symbol(interaction_p),
+            'participant_icc': icc,
+            'r2_marginal': r2_marginal,
+            'r2_conditional': r2_conditional,
+            'aic': aic,
+            'bic': bic,
+            'loglik': loglik,
+            'covariates': covariate_results,
+            'fit': fit  # Store the full model fit for reference
         }
         
         # Print key results
         print(f"  Results:")
-        print(f"    Overall Green effect: {green_effect:.3f} {green_significance} (p={green_p:.4f})")
-        print(f"    Shrub interaction: {shrub_int_effect:.3f} {shrub_int_significance} (p={shrub_int_p:.4f})")
-        print(f"    Tree interaction: {tree_int_effect:.3f} {tree_int_significance} (p={tree_int_p:.4f})")
-        print(f"    Total Shrub effect: {shrub_total_effect:.3f} {shrub_total_significance} (p={shrub_total_p:.4f})")
-        print(f"    Total Tree effect: {tree_total_effect:.3f} {tree_total_significance} (p={tree_total_p:.4f})")
-        print(f"    Model fit: R²={r2:.3f}, Adj. R²={adj_r2:.3f}, F({fit.df_model:.0f},{fit.df_resid:.0f})={f_stat:.2f}, p={f_pvalue:.4f}")
+        print(f"    IsGreen effect (in shrub group): {green_effect:.3f} {get_significance_symbol(green_p)} (p={green_p:.4f})")
+        print(f"    RunGroupType effect: {group_effect:.3f} {get_significance_symbol(group_p)} (p={group_p:.4f})")
+        print(f"    Tree_Interaction effect: {interaction:.3f} {get_significance_symbol(interaction_p)} (p={interaction_p:.4f})")
+        print(f"    Participant_ICC: {icc:.3f}, R² Marginal: {r2_marginal:.3f}, R² Conditional: {r2_conditional:.3f}")
+        print(f"    AIC: {aic:.2f}, BIC: {bic:.2f}")
         
-        # Print covariate effects
-        for cov, cov_effect in covariate_effects.items():
-            print(f"    {cov} effect: {cov_effect['coef']:.3f} {cov_effect['significance']} (p={cov_effect['p_value']:.4f})")
-        
-        return fit, summary, coefficients_df
-        
+        return results
     except Exception as e:
-        print(f"  Error fitting model: {str(e)}")
-        return None, None, None
+        print(f"  Error: {str(e)}")
+        return None
 
-# Fit models for all dependent variables
-for dep_var in dep_vars:
-    model, summary, coefficients = run_regression_model(df, dep_var)
-    
-    if model is not None and summary is not None:
-        all_models[dep_var] = model
-        model_summaries[dep_var] = summary
-        model_coefficients[dep_var] = coefficients
-
-# Create Excel output with professional formatting
-def create_excel_report(all_models, model_summaries, model_coefficients):
-    """
-    Create a professionally formatted Excel report with a summary sheet 
-    and detailed individual sheets for each model.
-    """
+def create_excel_report(results):
+    """Create a clean, simple Excel report with results"""
     print("\nCreating Excel report...")
     
-    # Check if we have any successful models
-    if not model_summaries:
-        print("No successful models to report")
-        return None
+    if not results:
+        print("No results to report")
+        return
     
-    # Create Excel file
-    excel_path = 'results/green_regression_models.xlsx'
+    excel_path = 'results/green_environment_models.xlsx'
     writer = pd.ExcelWriter(excel_path, engine='openpyxl')
     
-    # Define styles
-    header_font = Font(bold=True, size=12)
-    header_fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
-    subheader_font = Font(bold=True, size=11)
-    subheader_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    # Create styles
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill(start_color="E0EBF5", end_color="E0EBF5", fill_type="solid")
     border = Border(
         left=Side(style='thin'), 
         right=Side(style='thin'), 
@@ -454,373 +394,225 @@ def create_excel_report(all_models, model_summaries, model_coefficients):
         bottom=Side(style='thin')
     )
     
-    # 1. Create summary sheet for overall green effects
-    green_effect_rows = []
+    # Get all possible covariates across all models
+    all_covariates = set()
+    for res in results.values():
+        for cov in res.get('covariates', {}):
+            all_covariates.add(cov)
+    all_covariates = sorted(list(all_covariates))
     
-    for dep_var, summary in model_summaries.items():
-        # Basic row with main effects
+    # Create summary rows with all effects and p-values
+    summary_rows = []
+    for dv, res in results.items():
+        # Start with basic info
         row = {
-            'Dependent Variable': dep_var,
-            'N': summary['n_obs'],
-            'Participants': summary['n_participants'],
-            'Overall Green Coef': summary['green_coef'],
-            'SE': summary['green_se'],
-            'p-value': summary['green_p'],
-            'CI 2.5%': summary['green_ci_lower'],
-            'CI 97.5%': summary['green_ci_upper'],
-            'Std Effect (d)': summary['green_std_effect'],
-            'Significance': summary['green_significance'],
-            'Shrub Total Effect': summary['shrub_total_coef'],
-            'Shrub p-value': summary['shrub_total_p'],
-            'Shrub Sig': summary['shrub_total_significance'],
-            'Tree Total Effect': summary['tree_total_coef'],
-            'Tree p-value': summary['tree_total_p'],
-            'Tree Sig': summary['tree_total_significance'],
-            'R²': summary['r2'],
-            'Adj R²': summary['adj_r2']
+            'Dependent Variable': dv,
+            'N': res['n'],
+            'Participants': res['participants'],
+            # Main effects with values and p-values separately
+            'IsGreen': res['green_effect'],
+            'IsGreen p': res['green_p'],
+            'IsGreen sig': res['green_sig'],
+            'RunGroupType': res['group_effect'],
+            'RunGroupType p': res['group_p'], 
+            'RunGroupType sig': res['group_sig'],
+            'Tree_Interaction': res['interaction'],
+            'Tree_Interaction p': res['interaction_p'],
+            'Tree_Interaction sig': res['interaction_sig'],
         }
         
-        # Add all covariate effects
-        for cov in covariates:
-            if cov in summary['covariate_effects']:
-                cov_effect = summary['covariate_effects'][cov]
-                row[f'{cov} Coef'] = cov_effect['coef']
-                row[f'{cov} p-value'] = cov_effect['p_value']
-                row[f'{cov} Sig'] = cov_effect['significance']
+        # Add all possible covariates (with empty values for those not in this model)
+        for cov in all_covariates:
+            if cov in res.get('covariates', {}):
+                cov_effect = res['covariates'][cov]
+                row[f'{cov}'] = cov_effect['coef']
+                row[f'{cov} p'] = cov_effect['p']
+                row[f'{cov} sig'] = cov_effect['sig']
             else:
-                # Covariate not used in this model (might be the DV or missing)
-                row[f'{cov} Coef'] = np.nan
-                row[f'{cov} p-value'] = np.nan
-                row[f'{cov} Sig'] = ''
+                row[f'{cov}'] = np.nan
+                row[f'{cov} p'] = np.nan
+                row[f'{cov} sig'] = ''
         
-        green_effect_rows.append(row)
+        # Add model fit metrics at the end
+        row['R² Marginal'] = res['r2_marginal']
+        row['R² Conditional'] = res['r2_conditional']
+        row['Participant_ICC'] = res['participant_icc']
+        row['AIC'] = res['aic']
+        row['BIC'] = res['bic']
+        
+        summary_rows.append(row)
     
-    if green_effect_rows:
-        # Sort by overall green p-value
-        green_effects_df = pd.DataFrame(green_effect_rows)
-        green_effects_df = green_effects_df.sort_values('p-value')
-        
-        # Write to Excel
-        green_effects_df.to_excel(writer, sheet_name='Green Effects', index=False)
-        
-        # Format the Green Effects sheet
-        workbook = writer.book
-        worksheet = writer.sheets['Green Effects']
-        
-        # Apply formatting to header row
-        for col in range(1, len(green_effects_df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = border
-        
-        # Set column widths
-        for col in range(1, len(green_effects_df.columns) + 1):
-            col_letter = get_column_letter(col)
-            worksheet.column_dimensions[col_letter].width = 15
-        
-        # Add auto-filter
-        worksheet.auto_filter.ref = worksheet.dimensions
+    # Sort by statistical significance of IsGreen effect
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df = summary_df.sort_values(['IsGreen sig', 'IsGreen p'], 
+                                       key=lambda x: pd.Categorical(summary_df['IsGreen sig'], 
+                                                                   categories=['***', '**', '*', '.', ''], 
+                                                                   ordered=True),
+                                       ascending=[False, True])
     
-    # 2. Create summary sheet for interaction effects
-    interaction_rows = []
+    # Write summary sheet
+    summary_df.to_excel(writer, sheet_name='Summary', index=False)
     
-    for dep_var, summary in model_summaries.items():
-        # Shrub interaction row
-        shrub_row = {
-            'Dependent Variable': dep_var,
-            'Interaction Type': 'Shrub',
-            'Interaction Coef': summary['shrub_int_coef'],
-            'SE': summary['shrub_int_se'],
-            'p-value': summary['shrub_int_p'],
-            'CI 2.5%': summary['shrub_int_ci_lower'],
-            'CI 97.5%': summary['shrub_int_ci_upper'],
-            'Std Effect (d)': summary['shrub_int_std_effect'],
-            'Significance': summary['shrub_int_significance'],
-            'Total Effect': summary['shrub_total_coef'],
-            'Total p-value': summary['shrub_total_p'],
-            'Total Sig': summary['shrub_total_significance']
-        }
-        interaction_rows.append(shrub_row)
-        
-        # Tree interaction row
-        tree_row = {
-            'Dependent Variable': dep_var,
-            'Interaction Type': 'Tree',
-            'Interaction Coef': summary['tree_int_coef'],
-            'SE': summary['tree_int_se'],
-            'p-value': summary['tree_int_p'],
-            'CI 2.5%': summary['tree_int_ci_lower'],
-            'CI 97.5%': summary['tree_int_ci_upper'],
-            'Std Effect (d)': summary['tree_int_std_effect'],
-            'Significance': summary['tree_int_significance'],
-            'Total Effect': summary['tree_total_coef'],
-            'Total p-value': summary['tree_total_p'],
-            'Total Sig': summary['tree_total_significance']
-        }
-        interaction_rows.append(tree_row)
+    # Format summary sheet
+    ws = writer.sheets['Summary']
     
-    if interaction_rows:
-        # Create DataFrame and sort
-        interactions_df = pd.DataFrame(interaction_rows)
-        interactions_df = interactions_df.sort_values(['Dependent Variable', 'p-value'])
-        
-        # Write to Excel
-        interactions_df.to_excel(writer, sheet_name='Interaction Effects', index=False)
-        
-        # Format the Interaction Effects sheet
-        worksheet = writer.sheets['Interaction Effects']
-        
-        # Apply formatting to header row
-        for col in range(1, len(interactions_df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = border
-        
-        # Set column widths
-        for col in range(1, len(interactions_df.columns) + 1):
-            col_letter = get_column_letter(col)
-            worksheet.column_dimensions[col_letter].width = 15
-        
-        # Add auto-filter
-        worksheet.auto_filter.ref = worksheet.dimensions
+    # Create grouped headers
+    ws.insert_rows(1)
     
-    # 3. Create summary sheet for covariate effects
-    covariate_effect_rows = []
+    # Calculate column positions
+    covariate_start_col = 13
+    covariate_end_col = covariate_start_col + (len(all_covariates) * 3) - 1
+    model_fit_start_col = covariate_end_col + 1
     
-    for dep_var, summary in model_summaries.items():
-        for cov, cov_effect in summary.get('covariate_effects', {}).items():
-            row = {
-                'Dependent Variable': dep_var,
-                'Covariate': cov,
-                'Coefficient': cov_effect.get('coef', np.nan),
-                'Std Error': cov_effect.get('se', np.nan),
-                'p-value': cov_effect.get('p_value', np.nan),
-                'CI 2.5%': cov_effect.get('ci_lower', np.nan),
-                'CI 97.5%': cov_effect.get('ci_upper', np.nan),
-                'Significance': cov_effect.get('significance', '')
-            }
-            covariate_effect_rows.append(row)
+    # Set main header cells
+    main_header_cells = {
+        'A1': 'Basic Info',
+        'D1': 'IsGreen Effect',
+        'G1': 'RunGroupType Effect',
+        'J1': 'Tree_Interaction Effect'
+    }
     
-    if covariate_effect_rows:
-        # Create DataFrame and sort
-        covariate_effects_df = pd.DataFrame(covariate_effect_rows)
-        covariate_effects_df = covariate_effects_df.sort_values(['Covariate', 'p-value'])
-        
-        # Write to Excel
-        covariate_effects_df.to_excel(writer, sheet_name='Covariate Effects', index=False)
-        
-        # Format the Covariate Effects sheet
-        worksheet = writer.sheets['Covariate Effects']
-        
-        # Apply formatting to header row
-        for col in range(1, len(covariate_effects_df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = border
-        
-        # Set column widths
-        for col in range(1, len(covariate_effects_df.columns) + 1):
-            col_letter = get_column_letter(col)
-            worksheet.column_dimensions[col_letter].width = 15
-        
-        # Add auto-filter
-        worksheet.auto_filter.ref = worksheet.dimensions
+    # Add covariate headers
+    col_index = covariate_start_col
+    for cov in all_covariates:
+        col_letter = get_column_letter(col_index)
+        main_header_cells[f'{col_letter}1'] = f'{cov} Effect'
+        col_index += 3
     
-    # 4. Individual sheets for each model with detailed statistics
-    for dep_var in model_summaries.keys():
-        # Create safe sheet name (max 31 chars for Excel)
-        safe_name = dep_var
-        if len(safe_name) > 30:
-            safe_name = safe_name[:27] + "..."
+    # Add model fit header
+    model_fit_col = get_column_letter(model_fit_start_col)
+    main_header_cells[f'{model_fit_col}1'] = 'Model Fit'
+    
+    # Apply main headers
+    for cell_ref, value in main_header_cells.items():
+        ws[cell_ref] = value
+        ws[cell_ref].font = header_font
+        ws[cell_ref].fill = header_fill
+        ws[cell_ref].alignment = Alignment(horizontal='center')
+    
+    # Merge header cells
+    header_merges = {
+        'A1:C1': 'Basic Info',
+        'D1:F1': 'IsGreen Effect',
+        'G1:I1': 'RunGroupType Effect',
+        'J1:L1': 'Tree_Interaction Effect'
+    }
+    
+    # Add covariate merge ranges
+    col_index = covariate_start_col
+    for cov in all_covariates:
+        start_letter = get_column_letter(col_index)
+        end_letter = get_column_letter(col_index + 2)
+        header_merges[f'{start_letter}1:{end_letter}1'] = f'{cov} Effect'
+        col_index += 3
+    
+    # Add model fit merge range
+    model_fit_start_letter = get_column_letter(model_fit_start_col)
+    model_fit_end_letter = get_column_letter(model_fit_start_col + 4)  # Now 5 columns: R² Marginal, R² Conditional, ICC, AIC, BIC
+    header_merges[f'{model_fit_start_letter}1:{model_fit_end_letter}1'] = 'Model Fit'
+    
+    # Apply merges
+    for merge_range, _ in header_merges.items():
+        ws.merge_cells(merge_range)
+    
+    # Format all cells in the header rows
+    for col in range(1, len(summary_df.columns) + 1):
+        # Format second row (original header)
+        cell = ws.cell(row=2, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = border
         
-        # Get model details
-        summary = model_summaries[dep_var]
-        coefficients = model_coefficients.get(dep_var, None)
+        # Set column width
+        ws.column_dimensions[get_column_letter(col)].width = 12
+    
+    # Special width for first column
+    ws.column_dimensions['A'].width = 20
+    
+    # Add filter
+    ws.auto_filter.ref = f"A2:{get_column_letter(len(summary_df.columns))}2"
+    
+    # Individual model sheets (compact)
+    for dv, res in results.items():
+        # Create safe sheet name (max 31 chars)
+        sheet_name = dv[:30]
         
-        # Create data for detailed model sheet
-        detailed_data = []
+        # Create compact data for model sheet
+        model_data = [
+            ["Mixed Effects Model", dv, "", "", ""],
+            ["N:", f"{res['n']}", "Participants:", f"{res['participants']}", ""],
+            ["", "", "", "", ""],
+            ["Effect", "Estimate", "SE", "p-value", "Significance"],
+            ["IsGreen", f"{res['green_effect']:.4f}", f"{res['fit'].bse.get('IsGreen', np.nan):.4f}", f"{res['green_p']:.4f}", res['green_sig']],
+            ["RunGroupType", f"{res['group_effect']:.4f}", f"{res['fit'].bse.get('RunGroupType', np.nan):.4f}", f"{res['group_p']:.4f}", res['group_sig']],
+            ["Tree_Interaction", f"{res['interaction']:.4f}", f"{res['fit'].bse.get('IsGreen:RunGroupType', np.nan):.4f}", f"{res['interaction_p']:.4f}", res['interaction_sig']],
+            ["", "", "", "", ""],
+            ["Model Fit", "", "", "", ""],
+            ["R² Marginal:", f"{res['r2_marginal']:.4f}", "R² Conditional:", f"{res['r2_conditional']:.4f}", ""],
+            ["Participant_ICC:", f"{res['participant_icc']:.4f}", "Log-Likelihood:", f"{res['loglik']:.2f}", ""],
+            ["AIC:", f"{res['aic']:.2f}", "BIC:", f"{res['bic']:.2f}", ""]
+        ]
         
-        # Model summary section
-        detailed_data.append(["Model Summary", "", "", "", "", ""])
-        detailed_data.append(["Dependent Variable", dep_var, "", "", "", ""])
-        detailed_data.append(["Formula", summary['formula'], "", "", "", ""])
-        detailed_data.append(["Observations", summary['n_obs'], "", "", "", ""])
-        detailed_data.append(["Participants", summary['n_participants'], "", "", "", ""])
-        detailed_data.append(["R²", summary['r2'], "", "", "", ""])
-        detailed_data.append(["Adjusted R²", summary['adj_r2'], "", "", "", ""])
-        detailed_data.append(["F-statistic", f"F({summary['df_model']:.0f},{summary['df_resid']:.0f})={summary['f_stat']:.2f}, p={summary['f_pvalue']:.4f}", "", "", "", ""])
-        detailed_data.append(["Residual Std Dev", summary['resid_sd'], "", "", "", ""])
-        detailed_data.append(["", "", "", "", "", ""])  # Empty row
-        
-        # Overall green effect
-        detailed_data.append(["Overall Green Effect", "", "", "", "", ""])
-        detailed_data.append(["Coefficient", "Std Error", "p-value", "CI 2.5%", "CI 97.5%", "Significance"])
-        detailed_data.append([
-            summary['green_coef'],
-            summary['green_se'],
-            summary['green_p'],
-            summary['green_ci_lower'],
-            summary['green_ci_upper'],
-            summary['green_significance']
-        ])
-        detailed_data.append(["", "", "", "", "", ""])  # Empty row
-        
-        # Interaction effects section
-        detailed_data.append(["Interaction Effects", "", "", "", "", ""])
-        detailed_data.append(["Type", "Coefficient", "Std Error", "p-value", "CI 2.5%", "CI 97.5%"])
-        
-        # Shrub interaction
-        detailed_data.append([
-            "Shrub",
-            summary['shrub_int_coef'],
-            summary['shrub_int_se'],
-            summary['shrub_int_p'],
-            summary['shrub_int_ci_lower'],
-            summary['shrub_int_ci_upper']
-        ])
-        
-        # Tree interaction
-        detailed_data.append([
-            "Tree",
-            summary['tree_int_coef'],
-            summary['tree_int_se'],
-            summary['tree_int_p'],
-            summary['tree_int_ci_lower'],
-            summary['tree_int_ci_upper']
-        ])
-        detailed_data.append(["", "", "", "", "", ""])  # Empty row
-        
-        # Total effects section
-        detailed_data.append(["Total Effects by Condition", "", "", "", "", ""])
-        detailed_data.append(["Condition", "Coefficient", "Std Error", "p-value", "CI 2.5%", "CI 97.5%"])
-        
-        # Shrub total effect
-        detailed_data.append([
-            "Shrub",
-            summary['shrub_total_coef'],
-            summary['shrub_total_se'],
-            summary['shrub_total_p'],
-            summary['shrub_total_ci_lower'],
-            summary['shrub_total_ci_upper']
-        ])
-        
-        # Tree total effect
-        detailed_data.append([
-            "Tree",
-            summary['tree_total_coef'],
-            summary['tree_total_se'],
-            summary['tree_total_p'],
-            summary['tree_total_ci_lower'],
-            summary['tree_total_ci_upper']
-        ])
-        detailed_data.append(["", "", "", "", "", ""])  # Empty row
-        
-        # Standardized effect section
-        detailed_data.append(["Standardized Effects (Cohen's d)", "", "", "", "", ""])
-        detailed_data.append(["Effect Type", "Std Effect", "CI 2.5%", "CI 97.5%", "", ""])
-        
-        # Overall green
-        detailed_data.append([
-            "Overall Green",
-            summary['green_std_effect'],
-            summary['green_std_ci_lower'],
-            summary['green_std_ci_upper'],
-            "", ""
-        ])
-        
-        # Shrub interaction
-        detailed_data.append([
-            "Shrub Interaction",
-            summary['shrub_int_std_effect'],
-            summary['shrub_int_std_ci_lower'],
-            summary['shrub_int_std_ci_upper'],
-            "", ""
-        ])
-        
-        # Tree interaction
-        detailed_data.append([
-            "Tree Interaction",
-            summary['tree_int_std_effect'],
-            summary['tree_int_std_ci_lower'],
-            summary['tree_int_std_ci_upper'],
-            "", ""
-        ])
-        
-        # Total effects
-        detailed_data.append([
-            "Shrub Total",
-            summary['shrub_total_std_effect'],
-            summary['shrub_total_std_ci_lower'],
-            summary['shrub_total_std_ci_upper'],
-            "", ""
-        ])
-        
-        detailed_data.append([
-            "Tree Total",
-            summary['tree_total_std_effect'],
-            summary['tree_total_std_ci_lower'],
-            summary['tree_total_std_ci_upper'],
-            "", ""
-        ])
-        detailed_data.append(["", "", "", "", "", ""])  # Empty row
-        
-        # Covariate effects section
-        detailed_data.append(["Covariate Effects", "", "", "", "", ""])
-        detailed_data.append(["Covariate", "Coefficient", "Std Error", "p-value", "Significance", "CI 95%"])
-        
-        for cov, cov_effect in summary.get('covariate_effects', {}).items():
-            ci_str = f"[{cov_effect.get('ci_lower', np.nan):.3f}, {cov_effect.get('ci_upper', np.nan):.3f}]"
-            detailed_data.append([
-                cov,
-                cov_effect.get('coef', np.nan),
-                cov_effect.get('se', np.nan),
-                cov_effect.get('p_value', np.nan),
-                cov_effect.get('significance', ''),
-                ci_str
-            ])
-        
-        # Create DataFrame and write to Excel
-        detailed_df = pd.DataFrame(detailed_data)
-        detailed_df.to_excel(writer, sheet_name=safe_name, index=False, header=False)
-        
-        # Format the detailed sheet
-        worksheet = writer.sheets[safe_name]
-        
-        # Apply formatting to section headers and data
-        for row_idx, row_data in enumerate(detailed_data, 1):
-            if row_data[0] in ["Model Summary", "Overall Green Effect", "Interaction Effects", 
-                              "Total Effects by Condition", "Standardized Effects (Cohen's d)", 
-                              "Covariate Effects"]:
-                # Section header
-                cell = worksheet.cell(row=row_idx, column=1)
-                cell.font = header_font
-                cell.fill = subheader_fill
-                
-                # Format entire row
-                for col_idx in range(1, 7):
-                    cell = worksheet.cell(row=row_idx, column=col_idx)
-                    cell.font = header_font
-                    cell.fill = subheader_fill
+        # Add covariate section if there are any covariates
+        if res.get('covariates'):
+            model_data.append(["", "", "", "", ""])
+            model_data.append(["Covariates", "Estimate", "SE", "p-value", "Significance"])
             
-            elif row_data[0] in ["Type", "Condition", "Effect Type", "Covariate"] or (row_idx > 1 and detailed_data[row_idx-2][0] == "Overall Green Effect" and row_data[0] == "Coefficient"):
-                # Column header for data sections
-                for col_idx in range(1, 7):
-                    if col_idx <= len(row_data) and row_data[col_idx-1]:
-                        cell = worksheet.cell(row=row_idx, column=col_idx)
-                        cell.font = subheader_font
+            for cov, cov_res in res.get('covariates', {}).items():
+                model_data.append([
+                    cov, 
+                    f"{cov_res['coef']:.4f}", 
+                    f"{res['fit'].bse.get(cov, np.nan):.4f}",
+                    f"{cov_res['p']:.4f}", 
+                    cov_res['sig']
+                ])
         
+        # Convert to DataFrame and write to sheet
+        model_df = pd.DataFrame(model_data)
+        model_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+        
+        # Format model sheet
+        ws = writer.sheets[sheet_name]
+        
+        # Format headers and section titles
+        for row_idx, row_data in enumerate(model_data, 1):
+            if row_idx == 1:  # Title row
+                cell = ws.cell(row=row_idx, column=1)
+                cell.font = Font(bold=True, size=12)
+                
+                cell = ws.cell(row=row_idx, column=2)
+                cell.font = Font(bold=True, size=12)
+                
+            elif row_data[0] in ["Effect", "Model Fit", "Covariates"]:  # Section headers
+                cell = ws.cell(row=row_idx, column=1)
+                cell.font = header_font
+                cell.fill = header_fill
+                
+                # Format header row
+                for col_idx in range(1, 6):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.font = header_font
+                    cell.fill = header_fill
+            
         # Set column widths
-        for col in range(1, 7):
-            col_letter = get_column_letter(col)
-            worksheet.column_dimensions[col_letter].width = 18
+        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 15
+        ws.column_dimensions['D'].width = 15
+        ws.column_dimensions['E'].width = 12
     
+    # Save Excel file
+    writer.close()
     print(f"Excel report saved to {excel_path}")
-    return excel_path
 
-# Generate Excel report with detailed individual model sheets
-excel_file = create_excel_report(all_models, model_summaries, model_coefficients)
+# Run models for all dependent variables
+print("\nRunning mixed effects models for all dependent variables...")
+for dv in dep_vars:
+    results = run_mixed_model(df, dv)
+    if results:
+        all_results[dv] = results
+
+# Generate the report
+create_excel_report(all_results)
 
 print("\nAnalysis complete!")
