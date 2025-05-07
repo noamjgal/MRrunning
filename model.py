@@ -37,6 +37,7 @@ column_mappings = {
     'avg_close_to_skin_temp': 'AvgSkinTemp',
     'min_heart_rate': 'MinHR',
     'Average heart rate (bpm)': 'AvgHR',
+    'HR max': 'HR_max',
     'Recalculated_Speed_km_per_h': 'Speed_kmh',
     'Duration_seconds': 'Duration_s',
     
@@ -84,6 +85,14 @@ print(f"\nProcessing {len(numeric_columns)} numeric columns.")
 for col in numeric_columns:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
+
+
+df['PercentMaxHR'] = df.apply(lambda row: (row['AvgHR'] / row['HR_max'] * 100) 
+                                if pd.notna(row['HR_max']) and row['HR_max'] > 0 
+                                else np.nan, axis=1)
+print("\nCalculated PercentMaxHR")
+
+
 # Ensure Condition_num is numeric
 if 'Condition_num' in df.columns:
     df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
@@ -150,7 +159,7 @@ dep_vars = [
     'Duration_s', 'RPE', 'Enjoyment', 'Satisfaction', 'Relaxation', 'Healthy', 'LightWeighted', 
     'Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish', 'Concentration', 'MoveFreely', 'Exhaustion', 
     'Presence', 'Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo',
-    'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR'
+    'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR', 'PercentMaxHR'
 ]
 print(f"\nAnalyzing {len(dep_vars)} dependent variables: {dep_vars}")
 
@@ -317,7 +326,7 @@ def create_excel_report(results):
         print("No results to report")
         return
     
-    excel_path = 'results/green_environment_models.xlsx'
+    excel_path = 'results/mixed_effects_model.xlsx'
     writer = pd.ExcelWriter(excel_path, engine='openpyxl')
     
     # Create styles
