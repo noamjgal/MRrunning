@@ -71,10 +71,9 @@ column_mappings = {
     'Sense of belonging': 'Belonging'
 }
 
-# Only rename columns that actually exist in the data
+# Rename Columns
 rename_dict = {k: v for k, v in column_mappings.items() if k in df.columns}
 df = df.rename(columns=rename_dict)
-
 # Print renamed columns for reference
 print("\nRenamed columns:")
 print(df.columns.tolist())
@@ -82,11 +81,9 @@ print(df.columns.tolist())
 # Convert numeric columns to float
 numeric_columns = [col for col in df.columns if col in set(column_mappings.values())]
 print(f"\nProcessing {len(numeric_columns)} numeric columns.")
-
 for col in numeric_columns:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-
 # Ensure Condition_num is numeric
 if 'Condition_num' in df.columns:
     df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
@@ -94,7 +91,7 @@ else:
     print("ERROR: Condition_num column not found!")
     exit(1)
 
-print("\nAssigning participants to experimental groups...")
+
 # Determine if a participant was in tree group (1) or shrub group (0)
 participant_groups = {}
 
@@ -113,13 +110,6 @@ for participant_id in df['ParticipantID'].unique():
         participant_groups[participant_id] = 1  # Tree group
     elif has_shrub_runs and not has_tree_runs:
         participant_groups[participant_id] = 0  # Shrub group
-    else:
-        if has_tree_runs and has_shrub_runs:
-            print(f"  Warning: Participant {participant_id} has both tree and shrub runs. Assigning to tree group.")
-            participant_groups[participant_id] = 1
-        else:
-            print(f"  Warning: Participant {participant_id} has neither tree nor shrub runs. Assigning to shrub group.")
-            participant_groups[participant_id] = 0
 
 # Create RunGroupType column (Tree=1, Shrub=0)
 df['RunGroupType'] = df['ParticipantID'].map(participant_groups)
@@ -136,91 +126,37 @@ print(f"Condition_num:\n{df['Condition_num'].value_counts().sort_index()}")
 print(f"\nIsGreen (1=green, 0=control):\n{df['IsGreen'].value_counts()}")
 print(f"\nRunGroupType (1=tree group, 0=shrub group):\n{df['RunGroupType'].value_counts()}")
 
-# Calculate composite variables only if all required columns exist
+# Calculate composite variables
 print("\nCalculating composite variables...")
-
-# Presence composite - check if columns exist
+# Presence composite
 presence_items = ['Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo']
-available_presence = [col for col in presence_items if col in df.columns]
-if len(available_presence) > 0:
-    print(f"Creating Presence_Avg from {len(available_presence)} items: {available_presence}")
-    df['Presence_Avg'] = df[available_presence].mean(axis=1)
-else:
-    print("Warning: No presence items found, skipping Presence_Avg")
-    # Create a dummy column to avoid errors
-    df['Presence_Avg'] = np.nan
-
+df['Presence_Avg'] = df[presence_items].mean(axis=1)
 # Perceived Restorativeness Scale
 prs_items = ['Relaxation', 'Curiosity', 'OrderInSpace', 'EasyNavigation', 'ComfortableEnv']
-available_prs = [col for col in prs_items if col in df.columns]
-if len(available_prs) > 0:
-    print(f"Creating PRS_Avg from {len(available_prs)} items: {available_prs}")
-    df['PRS_Avg'] = df[available_prs].mean(axis=1)
-else:
-    print("Warning: No PRS items found, skipping PRS_Avg")
-    df['PRS_Avg'] = np.nan
-
+df['PRS_Avg'] = df[prs_items].mean(axis=1)
 # Place Attachment
 pa_items = ['Identification', 'Belonging']
-available_pa = [col for col in pa_items if col in df.columns]
-if len(available_pa) > 0:
-    print(f"Creating PlaceAttach_Avg from {len(available_pa)} items: {available_pa}")
-    df['PlaceAttach_Avg'] = df[available_pa].mean(axis=1)
-else:
-    print("Warning: No Place Attachment items found, skipping PlaceAttach_Avg")
-    df['PlaceAttach_Avg'] = np.nan
-
+df['PlaceAttach_Avg'] = df[pa_items].mean(axis=1)
 # Positive Affect
 positive_affect_items = ['Enjoyment', 'Satisfaction', 'Healthy', 'LightWeighted']
-available_pos = [col for col in positive_affect_items if col in df.columns]
-if len(available_pos) > 0:
-    print(f"Creating PositiveAffect_Avg from {len(available_pos)} items: {available_pos}")
-    df['PositiveAffect_Avg'] = df[available_pos].mean(axis=1)
-else:
-    print("Warning: No Positive Affect items found, skipping PositiveAffect_Avg")
-    df['PositiveAffect_Avg'] = np.nan
-
+df['PositiveAffect_Avg'] = df[positive_affect_items].mean(axis=1)
 # Negative Affect
 negative_affect_items = ['Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish']
-available_neg = [col for col in negative_affect_items if col in df.columns]
-if len(available_neg) > 0:
-    print(f"Creating NegativeAffect_Avg from {len(available_neg)} items: {available_neg}")
-    df['NegativeAffect_Avg'] = df[available_neg].mean(axis=1)
-else:
-    print("Warning: No Negative Affect items found, skipping NegativeAffect_Avg")
-    df['NegativeAffect_Avg'] = np.nan
+df['NegativeAffect_Avg'] = df[negative_affect_items].mean(axis=1)
 
-# Define all potential dependent variables
-potential_dep_vars = [
+# Define all dependent variables
+dep_vars = [
     'PRS_Avg', 'PlaceAttach_Avg', 'PositiveAffect_Avg', 'NegativeAffect_Avg', 
     'Duration_s', 'RPE', 'Enjoyment', 'Satisfaction', 'Relaxation', 'Healthy', 'LightWeighted', 
     'Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish', 'Concentration', 'MoveFreely', 'Exhaustion', 
     'Presence', 'Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo',
     'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR'
 ]
-
-# Filter to only include variables that exist in the data
-dep_vars = [var for var in potential_dep_vars if var in df.columns]
 print(f"\nAnalyzing {len(dep_vars)} dependent variables: {dep_vars}")
 
-# Define potential covariates
-potential_covariates = ['RunOrder_num', 'Age', 'Gender_num', 'VO2max', 'AvgSkinTemp', 'Presence_Avg']
-
-# Filter to only include covariates that exist in the data
-covariates = [cov for cov in potential_covariates if cov in df.columns]
+# Define covariates
+covariates = ['RunOrder_num', 'Age', 'Gender_num', 'VO2max', 'AvgSkinTemp', 'Presence_Avg']
 print(f"Using {len(covariates)} covariates: {covariates}")
-
-# Remove rows with missing values in key columns
-df_original_count = len(df)
-df = df.dropna(subset=['ParticipantID', 'Condition_num'])
-df_filtered_count = len(df)
-
-print(f"\nFiltered data: {df_filtered_count} observations (removed {df_original_count - df_filtered_count} rows with missing data)")
-
-# Check if we have sufficient data
-participant_counts = df.groupby('ParticipantID').size()
-print(f"\nTotal participants: {len(participant_counts)}")
-print(f"Participants with ≥2 observations: {sum(participant_counts >= 2)}")
 
 # Storage for results
 all_results = {}
@@ -236,7 +172,7 @@ def get_significance_symbol(p_value):
     elif p_value < 0.05:
         return '*'
     elif p_value < 0.1:
-        return '.'
+        return '†'
     else:
         return ''
 
