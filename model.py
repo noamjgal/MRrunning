@@ -87,9 +87,7 @@ for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
 
-df['PercentMaxHR'] = df.apply(lambda row: (row['AvgHR'] / row['HR_max'] * 100) 
-                                if pd.notna(row['HR_max']) and row['HR_max'] > 0 
-                                else np.nan, axis=1)
+df['PercentMaxHR'] = df.apply(lambda row: (row['AvgHR'] / row['HR_max'] * 100), axis=1)
 print("\nCalculated PercentMaxHR")
 
 
@@ -368,16 +366,11 @@ def create_excel_report(results):
         
         # Add all possible covariates (with empty values for those not in this model)
         for cov in all_covariates:
-            if cov in res.get('covariates', {}):
-                cov_effect = res['covariates'][cov]
-                row[f'{cov}'] = cov_effect['coef']
-                row[f'{cov} p'] = cov_effect['p']
-                row[f'{cov} sig'] = cov_effect['sig']
-            else:
-                row[f'{cov}'] = np.nan
-                row[f'{cov} p'] = np.nan
-                row[f'{cov} sig'] = ''
-        
+            cov_effect = res['covariates'][cov]
+            row[f'{cov}'] = cov_effect['coef']
+            row[f'{cov} p'] = cov_effect['p']
+            row[f'{cov} sig'] = cov_effect['sig']
+
         # Add model fit metrics at the end
         row['R² Marginal'] = res['r2_marginal']
         row['R² Conditional'] = res['r2_conditional']
