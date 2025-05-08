@@ -18,6 +18,30 @@ os.makedirs('results', exist_ok=True)
 print("Loading data...")
 df = pd.read_csv('data/Combined_Joined_Data.csv')
 
+# Model configuration - EDIT THIS SECTION to customize your models
+model_config = {
+    # Main experimental effects to always include (required)
+    'main_effects': ['IsGreen', 'RunGroupType', 'RunOrder_num'],
+    
+    # Interaction terms to include (set to empty list [] to exclude all interactions)
+    'interactions': [
+        # Specify as tuples of variables that should interact
+        #('IsGreen', 'RunGroupType'),  # Comment or delete to exclude IsGreen:RunGroupType interaction
+    ],
+    
+    # Covariates to include (set to empty list [] to exclude all covariates)
+    'covariates': [
+        #'Age', 
+        #'Gender_num', 
+        #'VO2max', 
+        #'AvgSkinTemp', 
+        # 'Presence_Avg',  # Uncomment to include Presence_Avg
+    ],
+    
+    # Use random intercept for participant
+    'random_intercept': 'ParticipantID'
+}
+
 # Print columns for reference
 print("\nAvailable columns:")
 columns_list = df.columns.tolist()
@@ -92,11 +116,8 @@ print("\nCalculated PercentMaxHR")
 
 
 # Ensure Condition_num is numeric
-if 'Condition_num' in df.columns:
-    df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
-else:
-    print("ERROR: Condition_num column not found!")
-    exit(1)
+df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
+
 
 
 # Determine if a participant was in tree group (2) or shrub group (1)
@@ -122,10 +143,7 @@ for participant_id in df['ParticipantID'].unique():
 df['RunGroupType'] = df['ParticipantID'].map(participant_groups)
 
 # Create green condition indicator (1=green, 0=control)
-df['IsGreen'] = (df['Condition_num'] > 0).astype(int)
-
-# Create interaction term
-df['IsGreen_RunGroupType'] = df['IsGreen'] * df['RunGroupType']
+df['IsGreen'] = (df['Condition_num'] > 0.5).astype(int)
 
 # Print condition counts
 print("\nCondition counts:")
@@ -190,9 +208,6 @@ def run_mixed_model(data, dep_var):
     # Prepare model data
     model_data = data.dropna(subset=[dep_var]).copy()
     
-    # Filter covariates to exclude current DV
-    valid_covs = [cov for cov in covariates if cov != dep_var]
-    
     # Skip model if insufficient data
     if len(model_data) < 10:
         print(f"  Skipping: Not enough data (N={len(model_data)})")
@@ -201,153 +216,158 @@ def run_mixed_model(data, dep_var):
     # Ensure ParticipantID is a string for grouping
     model_data['ParticipantID'] = model_data['ParticipantID'].astype(str)
     
-    # Create formula - factorial design with covariates
-    formula = f"{dep_var} ~ IsGreen + RunGroupType + IsGreen:RunGroupType"
+    # Start building the formula with main effects
+    formula_parts = [f"{dep_var} ~"]
     
-    # Add valid covariates if they have enough non-missing values
-    available_covs = []
-    if valid_covs:
-        available_covs = [cov for cov in valid_covs if cov in model_data.columns 
-                         and model_data[cov].notna().sum() > 0.8 * len(model_data)]
-        if available_covs:
-            formula += " + " + " + ".join(available_covs)
+    # Add main effects
+    valid_main_effects = [effect for effect in model_config['main_effects'] 
+                         if effect in model_data.columns and effect != dep_var]
+    if valid_main_effects:
+        formula_parts.append(" + ".join(valid_main_effects))
+    
+    # Add interaction terms
+    for var1, var2 in model_config['interactions']:
+        if var1 in model_data.columns and var2 in model_data.columns and var1 != dep_var and var2 != dep_var:
+            formula_parts.append(f"{var1}:{var2}")
+    
+    # Add covariates
+    valid_covariates = [cov for cov in model_config['covariates'] 
+                       if cov in model_data.columns and cov != dep_var
+                       and model_data[cov].notna().sum() > 0.8 * len(model_data)]
+    if valid_covariates:
+        formula_parts.append(" + ".join(valid_covariates))
+    
+    # Join all parts with +
+    formula = " + ".join(formula_parts)
     
     print(f"  Formula: {formula}")
     print(f"  N = {len(model_data)}, Participants = {model_data['ParticipantID'].nunique()}")
     
     try:
         # Run mixed model with random intercept for participant
-        model = smf.mixedlm(formula, model_data, groups=model_data["ParticipantID"])
-        fit = model.fit(reml=True)
-        
-        # Extract key parameters
-        # Intercept
-        intercept = fit.params.get('Intercept', np.nan)
-        intercept_p = fit.pvalues.get('Intercept', np.nan)
-        intercept_se = fit.bse.get('Intercept', np.nan)
-        
-        # IsGreen effect (effect in shrub group, the reference level)
-        green_effect = fit.params.get('IsGreen', np.nan)
-        green_p = fit.pvalues.get('IsGreen', np.nan)
-        green_se = fit.bse.get('IsGreen', np.nan)
-        
-        # RunGroupType effect (difference between tree and shrub groups)
-        group_effect = fit.params.get('RunGroupType', np.nan)
-        group_p = fit.pvalues.get('RunGroupType', np.nan)
-        group_se = fit.bse.get('RunGroupType', np.nan)
-        
-        # Interaction effect (additional effect of IsGreen in the tree group)
-        interaction = fit.params.get('IsGreen:RunGroupType', np.nan)
-        interaction_p = fit.pvalues.get('IsGreen:RunGroupType', np.nan)
-        interaction_se = fit.bse.get('IsGreen:RunGroupType', np.nan)
-        
-        # Get random effects variance
-        random_var = float(fit.cov_re.iloc[0, 0])
-        residual_var = fit.scale
-        icc = random_var / (random_var + residual_var)
-        
-        # Store random effects for each participant
-        random_effects = fit.random_effects
-        # Safely extract random effects values
-        random_effects_values = []
-        for participant, re_value in random_effects.items():
-            # Extract the value (could be in different formats depending on statsmodels version)
-            if hasattr(re_value, 'iloc') and re_value.size > 0:  # DataFrame or Series
-                value = float(re_value.iloc[0])
-            elif hasattr(re_value, 'item'):  # numpy array
-                value = float(re_value.item())
-            elif isinstance(re_value, (int, float)):
-                value = float(re_value)
-            else:
-                # Try to convert to float if possible
-                try:
+        random_intercept = model_config['random_intercept']
+        if random_intercept in model_data.columns:
+            model = smf.mixedlm(formula, model_data, groups=model_data[random_intercept])
+            fit = model.fit(reml=True)
+            
+            # Extract key parameters
+            results = {
+                'n': len(model_data),
+                'participants': model_data['ParticipantID'].nunique(),
+                'formula': formula,
+                'fit': fit,
+                'intercept': fit.params.get('Intercept', np.nan),
+                'intercept_se': fit.bse.get('Intercept', np.nan),
+                'intercept_p': fit.pvalues.get('Intercept', np.nan),
+            }
+            
+            # Get coefficients for all variables
+            for var in valid_main_effects + valid_covariates:
+                results[f'{var}_effect'] = fit.params.get(var, np.nan)
+                results[f'{var}_p'] = fit.pvalues.get(var, np.nan)
+                results[f'{var}_se'] = fit.bse.get(var, np.nan)
+                results[f'{var}_sig'] = get_significance_symbol(fit.pvalues.get(var, np.nan))
+            
+            # Get coefficients for interaction terms
+            for var1, var2 in model_config['interactions']:
+                interaction_term = f"{var1}:{var2}"
+                if interaction_term in fit.params:
+                    results[f'{var1}_{var2}_interaction'] = fit.params.get(interaction_term, np.nan)
+                    results[f'{var1}_{var2}_interaction_p'] = fit.pvalues.get(interaction_term, np.nan)
+                    results[f'{var1}_{var2}_interaction_se'] = fit.bse.get(interaction_term, np.nan)
+                    results[f'{var1}_{var2}_interaction_sig'] = get_significance_symbol(fit.pvalues.get(interaction_term, np.nan))
+            
+            # Get random effects variance
+            random_var = float(fit.cov_re.iloc[0, 0])
+            residual_var = fit.scale
+            icc = random_var / (random_var + residual_var)
+            
+            # Store random effects for each participant
+            random_effects = fit.random_effects
+            # Safely extract random effects values
+            random_effects_values = []
+            for participant, re_value in random_effects.items():
+                # Extract the value (could be in different formats depending on statsmodels version)
+                if hasattr(re_value, 'iloc') and re_value.size > 0:  # DataFrame or Series
+                    value = float(re_value.iloc[0])
+                elif hasattr(re_value, 'item'):  # numpy array
+                    value = float(re_value.item())
+                elif isinstance(re_value, (int, float)):
                     value = float(re_value)
-                except (TypeError, ValueError):
-                    print(f"Warning: Could not convert random effect to float: {re_value}")
-                    value = 0.0
-            random_effects_values.append(value)
-        
-        # Calculate statistics on the extracted values
-        random_effects_stats = {
-            'mean': float(np.mean(random_effects_values)) if random_effects_values else 0.0,
-            'sd': float(np.std(random_effects_values)) if random_effects_values else 0.0,
-            'min': float(np.min(random_effects_values)) if random_effects_values else 0.0,
-            'max': float(np.max(random_effects_values)) if random_effects_values else 0.0
-        }
-        
-        # Calculate simplified R² values
-        total_var = model_data[dep_var].var()
-        residuals = model_data[dep_var] - fit.fittedvalues
-        residual_var_actual = np.var(residuals)
-        
-        # Marginal R² - fixed effects only
-        r2_marginal = 1 - (residual_var_actual / total_var)
-        
-        # Conditional R² - fixed + random effects 
-        # Note: This is an approximation
-        r2_conditional = 1 - (residual_var / total_var)
-        
-        # Make sure R² values are within bounds
-        r2_marginal = max(0, min(1, r2_marginal))
-        r2_conditional = max(0, min(1, r2_conditional))
-        
-        # Calculate AIC and BIC manually
-        # Count parameters: fixed effects + 1 for random intercept variance + 1 for residual variance
-        n_fixed_params = len(fit.params)
-        k = n_fixed_params + 2  # +2 for random intercept variance and residual variance
-        n = len(model_data)
-        loglik = fit.llf
-        aic = -2 * loglik + 2 * k
-        bic = -2 * loglik + k * np.log(n)
-        
-        # Get covariate effects
-        covariate_results = {}
-        for cov in available_covs:
-            if cov in fit.params:
-                covariate_results[cov] = {
-                    'coef': fit.params.get(cov, np.nan),
-                    'p': fit.pvalues.get(cov, np.nan),
-                    'sig': get_significance_symbol(fit.pvalues.get(cov, np.nan))
-                }
-        
-        # Create results dictionary
-        results = {
-            'n': len(model_data),
-            'participants': model_data['ParticipantID'].nunique(),
-            'formula': formula,
-            'intercept': intercept,
-            'intercept_p': intercept_p,
-            'intercept_se': intercept_se,
-            'random_effects': random_effects_stats,  # Store the statistics instead of raw values
-            'green_effect': green_effect,
-            'green_p': green_p,
-            'green_sig': get_significance_symbol(green_p),
-            'group_effect': group_effect,
-            'group_p': group_p,
-            'group_sig': get_significance_symbol(group_p),
-            'interaction': interaction,
-            'interaction_p': interaction_p,
-            'interaction_sig': get_significance_symbol(interaction_p),
-            'participant_icc': icc,
-            'r2_marginal': r2_marginal,
-            'r2_conditional': r2_conditional,
-            'aic': aic,
-            'bic': bic,
-            'loglik': loglik,
-            'covariates': covariate_results,
-            'fit': fit  # Store the full model fit for reference
-        }
-        
-        # Print key results
-        print(f"  Results:")
-        print(f"    Intercept: {intercept:.3f}")
-        print(f"    IsGreen effect (in shrub group): {green_effect:.3f} {get_significance_symbol(green_p)} (p={green_p:.4f})")
-        print(f"    RunGroupType effect: {group_effect:.3f} {get_significance_symbol(group_p)} (p={group_p:.4f})")
-        print(f"    Tree_Interaction effect: {interaction:.3f} {get_significance_symbol(interaction_p)} (p={interaction_p:.4f})")
-        print(f"    Participant_ICC: {icc:.3f}, R² Marginal: {r2_marginal:.3f}, R² Conditional: {r2_conditional:.3f}")
-        print(f"    AIC: {aic:.2f}, BIC: {bic:.2f}")
-        
-        return results
+                else:
+                    # Try to convert to float if possible
+                    try:
+                        value = float(re_value)
+                    except (TypeError, ValueError):
+                        print(f"Warning: Could not convert random effect to float: {re_value}")
+                        value = 0.0
+                random_effects_values.append(value)
+            
+            # Calculate statistics on the extracted values
+            random_effects_stats = {
+                'mean': float(np.mean(random_effects_values)) if random_effects_values else 0.0,
+                'sd': float(np.std(random_effects_values)) if random_effects_values else 0.0,
+                'min': float(np.min(random_effects_values)) if random_effects_values else 0.0,
+                'max': float(np.max(random_effects_values)) if random_effects_values else 0.0
+            }
+            
+            results['random_effects'] = random_effects_stats
+            results['participant_icc'] = icc
+            
+            # Calculate simplified R² values
+            total_var = model_data[dep_var].var()
+            residuals = model_data[dep_var] - fit.fittedvalues
+            residual_var_actual = np.var(residuals)
+            
+            # Marginal R² - fixed effects only
+            r2_marginal = 1 - (residual_var_actual / total_var)
+            
+            # Conditional R² - fixed + random effects 
+            # Note: This is an approximation
+            r2_conditional = 1 - (residual_var / total_var)
+            
+            # Make sure R² values are within bounds
+            results['r2_marginal'] = max(0, min(1, r2_marginal))
+            results['r2_conditional'] = max(0, min(1, r2_conditional))
+            
+            # Calculate AIC and BIC manually
+            # Count parameters: fixed effects + 1 for random intercept variance + 1 for residual variance
+            n_fixed_params = len(fit.params)
+            k = n_fixed_params + 2  # +2 for random intercept variance and residual variance
+            n = len(model_data)
+            loglik = fit.llf
+            results['aic'] = -2 * loglik + 2 * k
+            results['bic'] = -2 * loglik + k * np.log(n)
+            results['loglik'] = loglik
+            
+            # Print key results
+            print(f"  Results:")
+            print(f"    Intercept: {results['intercept']:.3f}")
+            
+            # Print main effects
+            for var in valid_main_effects:
+                effect_name = f"{var}_effect"
+                p_name = f"{var}_p"
+                sig_name = f"{var}_sig"
+                if effect_name in results and p_name in results:
+                    print(f"    {var} effect: {results[effect_name]:.3f} {results[sig_name]} (p={results[p_name]:.4f})")
+            
+            # Print interaction effects
+            for var1, var2 in model_config['interactions']:
+                interaction_name = f"{var1}_{var2}_interaction"
+                p_name = f"{var1}_{var2}_interaction_p"
+                sig_name = f"{var1}_{var2}_interaction_sig"
+                if interaction_name in results and p_name in results:
+                    print(f"    {var1}:{var2} interaction: {results[interaction_name]:.3f} {results[sig_name]} (p={results[p_name]:.4f})")
+            
+            # Print model fit statistics
+            print(f"    Participant_ICC: {results['participant_icc']:.3f}, R² Marginal: {results['r2_marginal']:.3f}, R² Conditional: {results['r2_conditional']:.3f}")
+            print(f"    AIC: {results['aic']:.2f}, BIC: {results['bic']:.2f}")
+            
+            return results
+        else:
+            print(f"  Error: Random intercept variable {random_intercept} not found in data")
+            return None
     except Exception as e:
         print(f"  Error: {str(e)}")
         return None
@@ -375,12 +395,13 @@ def create_excel_report(results):
                 bottom=Side(style='thin')
             )
             
-            # Get all possible covariates across all models
-            all_covariates = set()
+            # Extract all parameter names from results
+            all_params = set()
             for res in results.values():
-                for cov in res.get('covariates', {}):
-                    all_covariates.add(cov)
-            all_covariates = sorted(list(all_covariates))
+                for key in res.keys():
+                    if key not in ['fit', 'random_effects', 'formula', 'n', 'participants', 'intercept', 'intercept_se', 'intercept_p']:
+                        if key.endswith('_effect') or key.endswith('_interaction'):
+                            all_params.add(key)
             
             # Create summary rows with all effects and p-values
             summary_rows = []
@@ -394,23 +415,19 @@ def create_excel_report(results):
                     'Intercept': res['intercept'],
                     'Random_Effects_Mean': res['random_effects']['mean'],
                     'Random_Effects_SD': res['random_effects']['sd'],
-                    # Main effects
-                    'IsGreen': res['green_effect'],
-                    'IsGreen p': res['green_p'],
-                    'IsGreen sig': res['green_sig'],
-                    'RunGroupType': res['group_effect'],
-                    'RunGroupType p': res['group_p'],
-                    'RunGroupType sig': res['group_sig'],
-                    'Tree_Interaction': res['interaction'],
-                    'Tree_Interaction p': res['interaction_p'],
-                    'Tree_Interaction sig': res['interaction_sig'],
                 }
                 
-                # Add covariate effects
-                for cov, cov_res in res['covariates'].items():
-                    row[f'{cov}'] = cov_res['coef']
-                    row[f'{cov} p'] = cov_res['p']
-                    row[f'{cov} sig'] = cov_res['sig']
+                # Add all parameters
+                for param in all_params:
+                    if param in res:
+                        row[param] = res[param]
+                        # Add p-value and significance if available
+                        p_key = param.replace('_effect', '_p').replace('_interaction', '_interaction_p')
+                        sig_key = param.replace('_effect', '_sig').replace('_interaction', '_interaction_sig')
+                        if p_key in res:
+                            row[p_key] = res[p_key]
+                        if sig_key in res:
+                            row[sig_key] = res[sig_key]
                 
                 # Add model fit metrics at the end
                 row['R² Marginal'] = res['r2_marginal']
@@ -421,17 +438,25 @@ def create_excel_report(results):
                 
                 summary_rows.append(row)
             
-            # Sort by statistical significance of IsGreen effect
-            summary_df = pd.DataFrame(summary_rows)
-            try:
-                summary_df = summary_df.sort_values(['IsGreen sig', 'IsGreen p'], 
-                                               key=lambda x: pd.Categorical(summary_df['IsGreen sig'], 
-                                                                           categories=['***', '**', '*', '†', ''], 
-                                                                           ordered=True),
-                                               ascending=[False, True])
-            except:
-                # Fallback if sort fails
-                pass
+            # Sort by p-value of first effect (usually IsGreen)
+            first_param = next(iter(all_params)) if all_params else None
+            if first_param:
+                p_key = first_param.replace('_effect', '_p').replace('_interaction', '_interaction_p')
+                sig_key = first_param.replace('_effect', '_sig').replace('_interaction', '_interaction_sig')
+                
+                summary_df = pd.DataFrame(summary_rows)
+                try:
+                    if sig_key in summary_df.columns:
+                        summary_df = summary_df.sort_values([sig_key, p_key], 
+                                                key=lambda x: pd.Categorical(summary_df[sig_key], 
+                                                                        categories=['***', '**', '*', '†', ''], 
+                                                                        ordered=True),
+                                                ascending=[False, True])
+                except:
+                    # Fallback if sort fails
+                    pass
+            else:
+                summary_df = pd.DataFrame(summary_rows)
             
             # Write summary sheet
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
@@ -475,6 +500,7 @@ def create_excel_report(results):
                     model_data = [
                         ["Mixed Effects Model", dv, "", "", ""],
                         ["N:", f"{res['n']}", "Participants:", f"{res['participants']}", ""],
+                        ["Formula:", f"{res['formula']}", "", "", ""],
                         ["", "", "", "", ""],
                         ["Model Components", "Value", "", "", ""],
                         ["Intercept", f"{res['intercept']:.4f}", "", "", ""],
@@ -484,29 +510,63 @@ def create_excel_report(results):
                         ["Max Random Effect", f"{res['random_effects']['max']:.4f}", "", "", ""],
                         ["", "", "", "", ""],
                         ["Fixed Effects", "Estimate", "SE", "p-value", "Significance"],
-                        ["IsGreen", f"{res['green_effect']:.4f}", f"{res['fit'].bse.get('IsGreen', np.nan):.4f}", f"{res['green_p']:.4f}", res['green_sig']],
-                        ["RunGroupType", f"{res['group_effect']:.4f}", f"{res['fit'].bse.get('RunGroupType', np.nan):.4f}", f"{res['group_p']:.4f}", res['group_sig']],
-                        ["Tree_Interaction", f"{res['interaction']:.4f}", f"{res['fit'].bse.get('IsGreen:RunGroupType', np.nan):.4f}", f"{res['interaction_p']:.4f}", res['interaction_sig']],
-                        ["", "", "", "", ""],
-                        ["Model Fit", "", "", "", ""],
-                        ["R² Marginal:", f"{res['r2_marginal']:.4f}", "R² Conditional:", f"{res['r2_conditional']:.4f}", ""],
-                        ["Participant_ICC:", f"{res['participant_icc']:.4f}", "Log-Likelihood:", f"{res['loglik']:.2f}", ""],
-                        ["AIC:", f"{res['aic']:.2f}", "BIC:", f"{res['bic']:.2f}", ""]
                     ]
                     
-                    # Add covariate section if there are any covariates
-                    if res.get('covariates'):
+                    # Add main effects
+                    for var in model_config['main_effects']:
+                        effect_key = f"{var}_effect"
+                        se_key = f"{var}_se"
+                        p_key = f"{var}_p"
+                        sig_key = f"{var}_sig"
+                        if effect_key in res:
+                            model_data.append([
+                                var, 
+                                f"{res[effect_key]:.4f}", 
+                                f"{res[se_key]:.4f}" if se_key in res else "",
+                                f"{res[p_key]:.4f}" if p_key in res else "", 
+                                res[sig_key] if sig_key in res else ""
+                            ])
+                    
+                    # Add interaction terms
+                    for var1, var2 in model_config['interactions']:
+                        interaction_key = f"{var1}_{var2}_interaction"
+                        se_key = f"{var1}_{var2}_interaction_se"
+                        p_key = f"{var1}_{var2}_interaction_p"
+                        sig_key = f"{var1}_{var2}_interaction_sig"
+                        if interaction_key in res:
+                            model_data.append([
+                                f"{var1}:{var2}", 
+                                f"{res[interaction_key]:.4f}", 
+                                f"{res[se_key]:.4f}" if se_key in res else "",
+                                f"{res[p_key]:.4f}" if p_key in res else "", 
+                                res[sig_key] if sig_key in res else ""
+                            ])
+                    
+                    # Add covariate effects
+                    if model_config['covariates']:
                         model_data.append(["", "", "", "", ""])
                         model_data.append(["Covariates", "Estimate", "SE", "p-value", "Significance"])
                         
-                        for cov, cov_res in res.get('covariates', {}).items():
-                            model_data.append([
-                                cov, 
-                                f"{cov_res['coef']:.4f}", 
-                                f"{res['fit'].bse.get(cov, np.nan):.4f}",
-                                f"{cov_res['p']:.4f}", 
-                                cov_res['sig']
-                            ])
+                        for cov in model_config['covariates']:
+                            effect_key = f"{cov}_effect"
+                            se_key = f"{cov}_se"
+                            p_key = f"{cov}_p"
+                            sig_key = f"{cov}_sig"
+                            if effect_key in res:
+                                model_data.append([
+                                    cov, 
+                                    f"{res[effect_key]:.4f}", 
+                                    f"{res[se_key]:.4f}" if se_key in res else "",
+                                    f"{res[p_key]:.4f}" if p_key in res else "", 
+                                    res[sig_key] if sig_key in res else ""
+                                ])
+                    
+                    # Add model fit stats
+                    model_data.append(["", "", "", "", ""])
+                    model_data.append(["Model Fit", "", "", "", ""])
+                    model_data.append(["R² Marginal:", f"{res['r2_marginal']:.4f}", "R² Conditional:", f"{res['r2_conditional']:.4f}", ""])
+                    model_data.append(["Participant_ICC:", f"{res['participant_icc']:.4f}", "Log-Likelihood:", f"{res['loglik']:.2f}", ""])
+                    model_data.append(["AIC:", f"{res['aic']:.2f}", "BIC:", f"{res['bic']:.2f}", ""])
                     
                     # Convert to DataFrame and write to sheet
                     model_df = pd.DataFrame(model_data)
