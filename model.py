@@ -99,7 +99,7 @@ else:
     exit(1)
 
 
-# Determine if a participant was in tree group (1) or shrub group (0)
+# Determine if a participant was in tree group (2) or shrub group (1)
 participant_groups = {}
 
 # For each participant, check their condition assignments
@@ -112,13 +112,13 @@ for participant_id in df['ParticipantID'].unique():
     # Check if they have shrub runs (condition 1)
     has_shrub_runs = (participant_data['Condition_num'] == 1).any()
     
-    # Assign group (1 for tree group, 0 for shrub group)
+    # Assign group (2 for tree group, 1 for shrub group)
     if has_tree_runs and not has_shrub_runs:
-        participant_groups[participant_id] = 1  # Tree group
+        participant_groups[participant_id] = 2  # Tree group
     elif has_shrub_runs and not has_tree_runs:
-        participant_groups[participant_id] = 0  # Shrub group
+        participant_groups[participant_id] = 1  # Shrub group
 
-# Create RunGroupType column (Tree=1, Shrub=0)
+# Create RunGroupType column (Tree=2, Shrub=1)
 df['RunGroupType'] = df['ParticipantID'].map(participant_groups)
 
 # Create green condition indicator (1=green, 0=control)
@@ -131,7 +131,7 @@ df['IsGreen_RunGroupType'] = df['IsGreen'] * df['RunGroupType']
 print("\nCondition counts:")
 print(f"Condition_num:\n{df['Condition_num'].value_counts().sort_index()}")
 print(f"\nIsGreen (1=green, 0=control):\n{df['IsGreen'].value_counts()}")
-print(f"\nRunGroupType (1=tree group, 0=shrub group):\n{df['RunGroupType'].value_counts()}")
+print(f"\nRunGroupType (2=tree group, 1=shrub group):\n{df['RunGroupType'].value_counts()}")
 
 # Calculate composite variables
 print("\nCalculating composite variables...")
@@ -221,6 +221,11 @@ def run_mixed_model(data, dep_var):
         fit = model.fit(reml=True)
         
         # Extract key parameters
+        # Intercept
+        intercept = fit.params.get('Intercept', np.nan)
+        intercept_p = fit.pvalues.get('Intercept', np.nan)
+        intercept_se = fit.bse.get('Intercept', np.nan)
+        
         # IsGreen effect (effect in shrub group, the reference level)
         green_effect = fit.params.get('IsGreen', np.nan)
         green_p = fit.pvalues.get('IsGreen', np.nan)
@@ -241,8 +246,34 @@ def run_mixed_model(data, dep_var):
         residual_var = fit.scale
         icc = random_var / (random_var + residual_var)
         
-        # Calculate R-squared values for mixed models (simpler approach)
-        # Using the method from the 'performance' package in R
+        # Store random effects for each participant
+        random_effects = fit.random_effects
+        # Safely extract random effects values
+        random_effects_values = []
+        for participant, re_value in random_effects.items():
+            # Extract the value (could be in different formats depending on statsmodels version)
+            if hasattr(re_value, 'iloc') and re_value.size > 0:  # DataFrame or Series
+                value = float(re_value.iloc[0])
+            elif hasattr(re_value, 'item'):  # numpy array
+                value = float(re_value.item())
+            elif isinstance(re_value, (int, float)):
+                value = float(re_value)
+            else:
+                # Try to convert to float if possible
+                try:
+                    value = float(re_value)
+                except (TypeError, ValueError):
+                    print(f"Warning: Could not convert random effect to float: {re_value}")
+                    value = 0.0
+            random_effects_values.append(value)
+        
+        # Calculate statistics on the extracted values
+        random_effects_stats = {
+            'mean': float(np.mean(random_effects_values)) if random_effects_values else 0.0,
+            'sd': float(np.std(random_effects_values)) if random_effects_values else 0.0,
+            'min': float(np.min(random_effects_values)) if random_effects_values else 0.0,
+            'max': float(np.max(random_effects_values)) if random_effects_values else 0.0
+        }
         
         # Calculate simplified R² values
         total_var = model_data[dep_var].var()
@@ -284,6 +315,10 @@ def run_mixed_model(data, dep_var):
             'n': len(model_data),
             'participants': model_data['ParticipantID'].nunique(),
             'formula': formula,
+            'intercept': intercept,
+            'intercept_p': intercept_p,
+            'intercept_se': intercept_se,
+            'random_effects': random_effects_stats,  # Store the statistics instead of raw values
             'green_effect': green_effect,
             'green_p': green_p,
             'green_sig': get_significance_symbol(green_p),
@@ -305,6 +340,7 @@ def run_mixed_model(data, dep_var):
         
         # Print key results
         print(f"  Results:")
+        print(f"    Intercept: {intercept:.3f}")
         print(f"    IsGreen effect (in shrub group): {green_effect:.3f} {get_significance_symbol(green_p)} (p={green_p:.4f})")
         print(f"    RunGroupType effect: {group_effect:.3f} {get_significance_symbol(group_p)} (p={group_p:.4f})")
         print(f"    Tree_Interaction effect: {interaction:.3f} {get_significance_symbol(interaction_p)} (p={interaction_p:.4f})")
@@ -324,224 +360,267 @@ def create_excel_report(results):
         print("No results to report")
         return
     
-    excel_path = 'results/mixed_effects_model.xlsx'
-    writer = pd.ExcelWriter(excel_path, engine='openpyxl')
-    
-    # Create styles
-    header_font = Font(bold=True, size=11)
-    header_fill = PatternFill(start_color="E0EBF5", end_color="E0EBF5", fill_type="solid")
-    border = Border(
-        left=Side(style='thin'), 
-        right=Side(style='thin'), 
-        top=Side(style='thin'), 
-        bottom=Side(style='thin')
-    )
-    
-    # Get all possible covariates across all models
-    all_covariates = set()
-    for res in results.values():
-        for cov in res.get('covariates', {}):
-            all_covariates.add(cov)
-    all_covariates = sorted(list(all_covariates))
-    
-    # Create summary rows with all effects and p-values
-    summary_rows = []
-    for dv, res in results.items():
-        # Start with basic info
-        row = {
-            'Dependent Variable': dv,
-            'N': res['n'],
-            'Participants': res['participants'],
-            # Main effects with values and p-values separately
-            'IsGreen': res['green_effect'],
-            'IsGreen p': res['green_p'],
-            'IsGreen sig': res['green_sig'],
-            'RunGroupType': res['group_effect'],
-            'RunGroupType p': res['group_p'], 
-            'RunGroupType sig': res['group_sig'],
-            'Tree_Interaction': res['interaction'],
-            'Tree_Interaction p': res['interaction_p'],
-            'Tree_Interaction sig': res['interaction_sig'],
-        }
+    try:
+        excel_path = 'results/mixed_effects_model.xlsx'
         
-        # Add all possible covariates (with empty values for those not in this model)
-        for cov in all_covariates:
-            cov_effect = res['covariates'][cov]
-            row[f'{cov}'] = cov_effect['coef']
-            row[f'{cov} p'] = cov_effect['p']
-            row[f'{cov} sig'] = cov_effect['sig']
-
-        # Add model fit metrics at the end
-        row['R² Marginal'] = res['r2_marginal']
-        row['R² Conditional'] = res['r2_conditional']
-        row['Participant_ICC'] = res['participant_icc']
-        row['AIC'] = res['aic']
-        row['BIC'] = res['bic']
-        
-        summary_rows.append(row)
-    
-    # Sort by statistical significance of IsGreen effect
-    summary_df = pd.DataFrame(summary_rows)
-    summary_df = summary_df.sort_values(['IsGreen sig', 'IsGreen p'], 
-                                       key=lambda x: pd.Categorical(summary_df['IsGreen sig'], 
-                                                                   categories=['***', '**', '*', '.', ''], 
-                                                                   ordered=True),
-                                       ascending=[False, True])
-    
-    # Write summary sheet
-    summary_df.to_excel(writer, sheet_name='Summary', index=False)
-    
-    # Format summary sheet
-    ws = writer.sheets['Summary']
-    
-    # Create grouped headers
-    ws.insert_rows(1)
-    
-    # Calculate column positions
-    covariate_start_col = 13
-    covariate_end_col = covariate_start_col + (len(all_covariates) * 3) - 1
-    model_fit_start_col = covariate_end_col + 1
-    
-    # Set main header cells
-    main_header_cells = {
-        'A1': 'Basic Info',
-        'D1': 'IsGreen Effect',
-        'G1': 'RunGroupType Effect',
-        'J1': 'Tree_Interaction Effect'
-    }
-    
-    # Add covariate headers
-    col_index = covariate_start_col
-    for cov in all_covariates:
-        col_letter = get_column_letter(col_index)
-        main_header_cells[f'{col_letter}1'] = f'{cov} Effect'
-        col_index += 3
-    
-    # Add model fit header
-    model_fit_col = get_column_letter(model_fit_start_col)
-    main_header_cells[f'{model_fit_col}1'] = 'Model Fit'
-    
-    # Apply main headers
-    for cell_ref, value in main_header_cells.items():
-        ws[cell_ref] = value
-        ws[cell_ref].font = header_font
-        ws[cell_ref].fill = header_fill
-        ws[cell_ref].alignment = Alignment(horizontal='center')
-    
-    # Merge header cells
-    header_merges = {
-        'A1:C1': 'Basic Info',
-        'D1:F1': 'IsGreen Effect',
-        'G1:I1': 'RunGroupType Effect',
-        'J1:L1': 'Tree_Interaction Effect'
-    }
-    
-    # Add covariate merge ranges
-    col_index = covariate_start_col
-    for cov in all_covariates:
-        start_letter = get_column_letter(col_index)
-        end_letter = get_column_letter(col_index + 2)
-        header_merges[f'{start_letter}1:{end_letter}1'] = f'{cov} Effect'
-        col_index += 3
-    
-    # Add model fit merge range
-    model_fit_start_letter = get_column_letter(model_fit_start_col)
-    model_fit_end_letter = get_column_letter(model_fit_start_col + 4)  # Now 5 columns: R² Marginal, R² Conditional, ICC, AIC, BIC
-    header_merges[f'{model_fit_start_letter}1:{model_fit_end_letter}1'] = 'Model Fit'
-    
-    # Apply merges
-    for merge_range, _ in header_merges.items():
-        ws.merge_cells(merge_range)
-    
-    # Format all cells in the header rows
-    for col in range(1, len(summary_df.columns) + 1):
-        # Format second row (original header)
-        cell = ws.cell(row=2, column=col)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.border = border
-        
-        # Set column width
-        ws.column_dimensions[get_column_letter(col)].width = 12
-    
-    # Special width for first column
-    ws.column_dimensions['A'].width = 20
-    
-    # Add filter
-    ws.auto_filter.ref = f"A2:{get_column_letter(len(summary_df.columns))}2"
-    
-    # Individual model sheets (compact)
-    for dv, res in results.items():
-        # Create safe sheet name (max 31 chars)
-        sheet_name = dv[:30]
-        
-        # Create compact data for model sheet
-        model_data = [
-            ["Mixed Effects Model", dv, "", "", ""],
-            ["N:", f"{res['n']}", "Participants:", f"{res['participants']}", ""],
-            ["", "", "", "", ""],
-            ["Effect", "Estimate", "SE", "p-value", "Significance"],
-            ["IsGreen", f"{res['green_effect']:.4f}", f"{res['fit'].bse.get('IsGreen', np.nan):.4f}", f"{res['green_p']:.4f}", res['green_sig']],
-            ["RunGroupType", f"{res['group_effect']:.4f}", f"{res['fit'].bse.get('RunGroupType', np.nan):.4f}", f"{res['group_p']:.4f}", res['group_sig']],
-            ["Tree_Interaction", f"{res['interaction']:.4f}", f"{res['fit'].bse.get('IsGreen:RunGroupType', np.nan):.4f}", f"{res['interaction_p']:.4f}", res['interaction_sig']],
-            ["", "", "", "", ""],
-            ["Model Fit", "", "", "", ""],
-            ["R² Marginal:", f"{res['r2_marginal']:.4f}", "R² Conditional:", f"{res['r2_conditional']:.4f}", ""],
-            ["Participant_ICC:", f"{res['participant_icc']:.4f}", "Log-Likelihood:", f"{res['loglik']:.2f}", ""],
-            ["AIC:", f"{res['aic']:.2f}", "BIC:", f"{res['bic']:.2f}", ""]
-        ]
-        
-        # Add covariate section if there are any covariates
-        if res.get('covariates'):
-            model_data.append(["", "", "", "", ""])
-            model_data.append(["Covariates", "Estimate", "SE", "p-value", "Significance"])
+        # Use context manager to ensure proper cleanup
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            # Create styles
+            header_font = Font(bold=True, size=11)
+            header_fill = PatternFill(start_color="E0EBF5", end_color="E0EBF5", fill_type="solid")
+            border = Border(
+                left=Side(style='thin'), 
+                right=Side(style='thin'), 
+                top=Side(style='thin'), 
+                bottom=Side(style='thin')
+            )
             
-            for cov, cov_res in res.get('covariates', {}).items():
-                model_data.append([
-                    cov, 
-                    f"{cov_res['coef']:.4f}", 
-                    f"{res['fit'].bse.get(cov, np.nan):.4f}",
-                    f"{cov_res['p']:.4f}", 
-                    cov_res['sig']
-                ])
-        
-        # Convert to DataFrame and write to sheet
-        model_df = pd.DataFrame(model_data)
-        model_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
-        
-        # Format model sheet
-        ws = writer.sheets[sheet_name]
-        
-        # Format headers and section titles
-        for row_idx, row_data in enumerate(model_data, 1):
-            if row_idx == 1:  # Title row
-                cell = ws.cell(row=row_idx, column=1)
-                cell.font = Font(bold=True, size=12)
+            # Get all possible covariates across all models
+            all_covariates = set()
+            for res in results.values():
+                for cov in res.get('covariates', {}):
+                    all_covariates.add(cov)
+            all_covariates = sorted(list(all_covariates))
+            
+            # Create summary rows with all effects and p-values
+            summary_rows = []
+            for dv, res in results.items():
+                # Start with basic info
+                row = {
+                    'Dependent Variable': dv,
+                    'N': res['n'],
+                    'Participants': res['participants'],
+                    # Intercept and random effects
+                    'Intercept': res['intercept'],
+                    'Random_Effects_Mean': res['random_effects']['mean'],
+                    'Random_Effects_SD': res['random_effects']['sd'],
+                    # Main effects
+                    'IsGreen': res['green_effect'],
+                    'IsGreen p': res['green_p'],
+                    'IsGreen sig': res['green_sig'],
+                    'RunGroupType': res['group_effect'],
+                    'RunGroupType p': res['group_p'],
+                    'RunGroupType sig': res['group_sig'],
+                    'Tree_Interaction': res['interaction'],
+                    'Tree_Interaction p': res['interaction_p'],
+                    'Tree_Interaction sig': res['interaction_sig'],
+                }
                 
-                cell = ws.cell(row=row_idx, column=2)
-                cell.font = Font(bold=True, size=12)
+                # Add covariate effects
+                for cov, cov_res in res['covariates'].items():
+                    row[f'{cov}'] = cov_res['coef']
+                    row[f'{cov} p'] = cov_res['p']
+                    row[f'{cov} sig'] = cov_res['sig']
                 
-            elif row_data[0] in ["Effect", "Model Fit", "Covariates"]:  # Section headers
-                cell = ws.cell(row=row_idx, column=1)
-                cell.font = header_font
-                cell.fill = header_fill
+                # Add model fit metrics at the end
+                row['R² Marginal'] = res['r2_marginal']
+                row['R² Conditional'] = res['r2_conditional']
+                row['Participant_ICC'] = res['participant_icc']
+                row['AIC'] = res['aic']
+                row['BIC'] = res['bic']
                 
-                # Format header row
-                for col_idx in range(1, 6):
-                    cell = ws.cell(row=row_idx, column=col_idx)
+                summary_rows.append(row)
+            
+            # Sort by statistical significance of IsGreen effect
+            summary_df = pd.DataFrame(summary_rows)
+            try:
+                summary_df = summary_df.sort_values(['IsGreen sig', 'IsGreen p'], 
+                                               key=lambda x: pd.Categorical(summary_df['IsGreen sig'], 
+                                                                           categories=['***', '**', '*', '†', ''], 
+                                                                           ordered=True),
+                                               ascending=[False, True])
+            except:
+                # Fallback if sort fails
+                pass
+            
+            # Write summary sheet
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Format summary sheet
+            ws = writer.sheets['Summary']
+            
+            # Create grouped headers
+            ws.insert_rows(1)
+            
+            # Calculate column positions
+            covariate_start_col = 13
+            covariate_end_col = covariate_start_col + (len(all_covariates) * 3) - 1
+            model_fit_start_col = covariate_end_col + 1
+            
+            # Set main header cells
+            main_header_cells = {
+                'A1': 'Basic Info',
+                'D1': 'Model Components',
+                'I1': 'IsGreen Effect',
+                'L1': 'RunGroupType Effect',
+                'O1': 'Tree_Interaction Effect'
+            }
+            
+            # Add covariate headers
+            col_index = covariate_start_col
+            for cov in all_covariates:
+                col_letter = get_column_letter(col_index)
+                main_header_cells[f'{col_letter}1'] = f'{cov} Effect'
+                col_index += 3
+            
+            # Add model fit header
+            model_fit_col = get_column_letter(model_fit_start_col)
+            main_header_cells[f'{model_fit_col}1'] = 'Model Fit'
+            
+            # Apply headers first
+            for cell_ref, value in main_header_cells.items():
+                try:
+                    ws[cell_ref] = value
+                    ws[cell_ref].font = header_font
+                    ws[cell_ref].fill = header_fill
+                    ws[cell_ref].alignment = Alignment(horizontal='center')
+                except Exception as e:
+                    print(f"Warning: Error setting header cell {cell_ref}: {str(e)}")
+            
+            # Define merge ranges
+            header_merges = {
+                'A1:C1': 'Basic Info',
+                'D1:H1': 'Model Components',
+                'I1:K1': 'IsGreen Effect',
+                'L1:N1': 'RunGroupType Effect',
+                'O1:Q1': 'Tree_Interaction Effect'
+            }
+            
+            # Add covariate merge ranges
+            col_index = covariate_start_col
+            for cov in all_covariates:
+                start_letter = get_column_letter(col_index)
+                end_letter = get_column_letter(col_index + 2)
+                header_merges[f'{start_letter}1:{end_letter}1'] = f'{cov} Effect'
+                col_index += 3
+            
+            # Add model fit merge range
+            model_fit_start_letter = get_column_letter(model_fit_start_col)
+            model_fit_end_letter = get_column_letter(model_fit_start_col + 4)  # Now 5 columns: R² Marginal, R² Conditional, ICC, AIC, BIC
+            header_merges[f'{model_fit_start_letter}1:{model_fit_end_letter}1'] = 'Model Fit'
+            
+            # Apply merges separately after all headers are set
+            for merge_range, _ in header_merges.items():
+                try:
+                    ws.merge_cells(merge_range)
+                except Exception as e:
+                    print(f"Warning: Error merging cells {merge_range}: {str(e)}")
+                    continue
+            
+            # Format all cells in the header rows
+            for col in range(1, len(summary_df.columns) + 1):
+                try:
+                    # Format second row (original header)
+                    cell = ws.cell(row=2, column=col)
                     cell.font = header_font
                     cell.fill = header_fill
+                    cell.border = border
+                    
+                    # Set column width
+                    ws.column_dimensions[get_column_letter(col)].width = 12
+                except Exception as e:
+                    print(f"Warning: Error formatting header cell at row 2, col {col}: {str(e)}")
             
-        # Set column widths
-        ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 12
-        ws.column_dimensions['C'].width = 15
-        ws.column_dimensions['D'].width = 15
-        ws.column_dimensions['E'].width = 12
-    
-    # Save Excel file
-    writer.close()
-    print(f"Excel report saved to {excel_path}")
+            # Special width for first column
+            try:
+                ws.column_dimensions['A'].width = 20
+            except Exception as e:
+                print(f"Warning: Error setting column A width: {str(e)}")
+            
+            # Add filter
+            try:
+                ws.auto_filter.ref = f"A2:{get_column_letter(len(summary_df.columns))}2"
+            except Exception as e:
+                print(f"Warning: Error setting filter: {str(e)}")
+            
+            # Individual model sheets (compact)
+            for dv, res in results.items():
+                try:
+                    # Create safe sheet name (max 31 chars)
+                    sheet_name = dv[:30]
+                    
+                    # Create compact data for model sheet
+                    model_data = [
+                        ["Mixed Effects Model", dv, "", "", ""],
+                        ["N:", f"{res['n']}", "Participants:", f"{res['participants']}", ""],
+                        ["", "", "", "", ""],
+                        ["Model Components", "Value", "", "", ""],
+                        ["Intercept", f"{res['intercept']:.4f}", "", "", ""],
+                        ["Random Effects Mean", f"{res['random_effects']['mean']:.4f}", "", "", ""],
+                        ["Random Effects SD", f"{res['random_effects']['sd']:.4f}", "", "", ""],
+                        ["Min Random Effect", f"{res['random_effects']['min']:.4f}", "", "", ""],
+                        ["Max Random Effect", f"{res['random_effects']['max']:.4f}", "", "", ""],
+                        ["", "", "", "", ""],
+                        ["Fixed Effects", "Estimate", "SE", "p-value", "Significance"],
+                        ["IsGreen", f"{res['green_effect']:.4f}", f"{res['fit'].bse.get('IsGreen', np.nan):.4f}", f"{res['green_p']:.4f}", res['green_sig']],
+                        ["RunGroupType", f"{res['group_effect']:.4f}", f"{res['fit'].bse.get('RunGroupType', np.nan):.4f}", f"{res['group_p']:.4f}", res['group_sig']],
+                        ["Tree_Interaction", f"{res['interaction']:.4f}", f"{res['fit'].bse.get('IsGreen:RunGroupType', np.nan):.4f}", f"{res['interaction_p']:.4f}", res['interaction_sig']],
+                        ["", "", "", "", ""],
+                        ["Model Fit", "", "", "", ""],
+                        ["R² Marginal:", f"{res['r2_marginal']:.4f}", "R² Conditional:", f"{res['r2_conditional']:.4f}", ""],
+                        ["Participant_ICC:", f"{res['participant_icc']:.4f}", "Log-Likelihood:", f"{res['loglik']:.2f}", ""],
+                        ["AIC:", f"{res['aic']:.2f}", "BIC:", f"{res['bic']:.2f}", ""]
+                    ]
+                    
+                    # Add covariate section if there are any covariates
+                    if res.get('covariates'):
+                        model_data.append(["", "", "", "", ""])
+                        model_data.append(["Covariates", "Estimate", "SE", "p-value", "Significance"])
+                        
+                        for cov, cov_res in res.get('covariates', {}).items():
+                            model_data.append([
+                                cov, 
+                                f"{cov_res['coef']:.4f}", 
+                                f"{res['fit'].bse.get(cov, np.nan):.4f}",
+                                f"{cov_res['p']:.4f}", 
+                                cov_res['sig']
+                            ])
+                    
+                    # Convert to DataFrame and write to sheet
+                    model_df = pd.DataFrame(model_data)
+                    model_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+                    
+                    # Format model sheet
+                    ws = writer.sheets[sheet_name]
+                    
+                    # Format headers and section titles
+                    for row_idx, row_data in enumerate(model_data, 1):
+                        try:
+                            if row_idx == 1:  # Title row
+                                cell = ws.cell(row=row_idx, column=1)
+                                cell.font = Font(bold=True, size=12)
+                                
+                                cell = ws.cell(row=row_idx, column=2)
+                                cell.font = Font(bold=True, size=12)
+                                
+                            elif row_data[0] in ["Model Components", "Fixed Effects", "Model Fit", "Covariates"]:  # Section headers
+                                cell = ws.cell(row=row_idx, column=1)
+                                cell.font = header_font
+                                cell.fill = header_fill
+                                
+                                # Format header row
+                                for col_idx in range(1, 6):
+                                    cell = ws.cell(row=row_idx, column=col_idx)
+                                    cell.font = header_font
+                                    cell.fill = header_fill
+                        except Exception as e:
+                            print(f"Warning: Error formatting row {row_idx} in sheet {sheet_name}: {str(e)}")
+                    
+                    # Set column widths
+                    try:
+                        ws.column_dimensions['A'].width = 15
+                        ws.column_dimensions['B'].width = 12
+                        ws.column_dimensions['C'].width = 15
+                        ws.column_dimensions['D'].width = 15
+                        ws.column_dimensions['E'].width = 12
+                    except Exception as e:
+                        print(f"Warning: Error setting column widths in sheet {sheet_name}: {str(e)}")
+                except Exception as e:
+                    print(f"Warning: Error creating sheet for {dv}: {str(e)}")
+        
+        print(f"Excel report saved to {excel_path}")
+    except Exception as e:
+        print(f"Error creating Excel report: {str(e)}")
 
 # Run models for all dependent variables
 print("\nRunning mixed effects models for all dependent variables...")
