@@ -439,87 +439,19 @@ def create_excel_report(results):
             # Format summary sheet
             ws = writer.sheets['Summary']
             
-            # Create grouped headers
-            ws.insert_rows(1)
-            
-            # Calculate column positions
-            covariate_start_col = 13
-            covariate_end_col = covariate_start_col + (len(all_covariates) * 3) - 1
-            model_fit_start_col = covariate_end_col + 1
-            
-            # Set main header cells
-            main_header_cells = {
-                'A1': 'Basic Info',
-                'D1': 'Model Components',
-                'I1': 'IsGreen Effect',
-                'L1': 'RunGroupType Effect',
-                'O1': 'Tree_Interaction Effect'
-            }
-            
-            # Add covariate headers
-            col_index = covariate_start_col
-            for cov in all_covariates:
-                col_letter = get_column_letter(col_index)
-                main_header_cells[f'{col_letter}1'] = f'{cov} Effect'
-                col_index += 3
-            
-            # Add model fit header
-            model_fit_col = get_column_letter(model_fit_start_col)
-            main_header_cells[f'{model_fit_col}1'] = 'Model Fit'
-            
-            # Apply headers first
-            for cell_ref, value in main_header_cells.items():
-                try:
-                    ws[cell_ref] = value
-                    ws[cell_ref].font = header_font
-                    ws[cell_ref].fill = header_fill
-                    ws[cell_ref].alignment = Alignment(horizontal='center')
-                except Exception as e:
-                    print(f"Warning: Error setting header cell {cell_ref}: {str(e)}")
-            
-            # Define merge ranges
-            header_merges = {
-                'A1:C1': 'Basic Info',
-                'D1:H1': 'Model Components',
-                'I1:K1': 'IsGreen Effect',
-                'L1:N1': 'RunGroupType Effect',
-                'O1:Q1': 'Tree_Interaction Effect'
-            }
-            
-            # Add covariate merge ranges
-            col_index = covariate_start_col
-            for cov in all_covariates:
-                start_letter = get_column_letter(col_index)
-                end_letter = get_column_letter(col_index + 2)
-                header_merges[f'{start_letter}1:{end_letter}1'] = f'{cov} Effect'
-                col_index += 3
-            
-            # Add model fit merge range
-            model_fit_start_letter = get_column_letter(model_fit_start_col)
-            model_fit_end_letter = get_column_letter(model_fit_start_col + 4)  # Now 5 columns: R² Marginal, R² Conditional, ICC, AIC, BIC
-            header_merges[f'{model_fit_start_letter}1:{model_fit_end_letter}1'] = 'Model Fit'
-            
-            # Apply merges separately after all headers are set
-            for merge_range, _ in header_merges.items():
-                try:
-                    ws.merge_cells(merge_range)
-                except Exception as e:
-                    print(f"Warning: Error merging cells {merge_range}: {str(e)}")
-                    continue
-            
-            # Format all cells in the header rows
-            for col in range(1, len(summary_df.columns) + 1):
-                try:
-                    # Format second row (original header)
-                    cell = ws.cell(row=2, column=col)
+            # Format header row (no merged cells)
+            try:
+                for col in range(1, len(summary_df.columns) + 1):
+                    # Format header cells
+                    cell = ws.cell(row=1, column=col)
                     cell.font = header_font
                     cell.fill = header_fill
                     cell.border = border
                     
                     # Set column width
                     ws.column_dimensions[get_column_letter(col)].width = 12
-                except Exception as e:
-                    print(f"Warning: Error formatting header cell at row 2, col {col}: {str(e)}")
+            except Exception as e:
+                print(f"Warning: Error formatting header row: {str(e)}")
             
             # Special width for first column
             try:
@@ -529,7 +461,7 @@ def create_excel_report(results):
             
             # Add filter
             try:
-                ws.auto_filter.ref = f"A2:{get_column_letter(len(summary_df.columns))}2"
+                ws.auto_filter.ref = f"A1:{get_column_letter(len(summary_df.columns))}1"
             except Exception as e:
                 print(f"Warning: Error setting filter: {str(e)}")
             
