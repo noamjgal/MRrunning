@@ -93,7 +93,12 @@ column_mappings = {
     'Ability to do things': 'AbilityToDo',
     'Identification': 'Identification',
     'Greenes of the environment': 'PerceivedGreenness',
-    'Sense of belonging': 'Belonging'
+    'Sense of belonging': 'Belonging',
+    
+    # Add missing environmental perception variables with proper mappings
+    'Interesting things to observe': 'InterestingObserve',
+    'Monotonous': 'Monotonous',
+    'Not well-maintained': 'NotMaintained'
 }
 
 # Rename Columns
@@ -114,11 +119,8 @@ for col in numeric_columns:
 df['PercentMaxHR'] = df.apply(lambda row: (row['AvgHR'] / row['HR_max'] * 100), axis=1)
 print("\nCalculated PercentMaxHR")
 
-
 # Ensure Condition_num is numeric
 df['Condition_num'] = pd.to_numeric(df['Condition_num'], errors='coerce')
-
-
 
 # Determine if a participant was in tree group (2) or shrub group (1)
 participant_groups = {}
@@ -169,14 +171,36 @@ df['PositiveAffect_Avg'] = df[positive_affect_items].mean(axis=1)
 negative_affect_items = ['Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish']
 df['NegativeAffect_Avg'] = df[negative_affect_items].mean(axis=1)
 
-# Define all dependent variables
+# Define all dependent variables - including BOTH composite scales AND individual items
 dep_vars = [
-    'PRS_Avg', 'PlaceAttach_Avg', 'PositiveAffect_Avg', 'NegativeAffect_Avg', 
-    'Duration_s', 'RPE', 'Enjoyment', 'Satisfaction', 'Relaxation', 'Healthy', 'LightWeighted', 
-    'Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish', 'Concentration', 'MoveFreely', 'Exhaustion', 
+    # Composite scales
+    'PRS_Avg', 'PlaceAttach_Avg', 'PositiveAffect_Avg', 'NegativeAffect_Avg', 'Presence_Avg',
+    
+    # Presence scale items (already included in original list)
     'Presence', 'Immersed', 'PhysicallyPresent', 'UseObjects', 'AbilityToDo',
-    'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR', 'PercentMaxHR'
+    
+    # PRS scale items
+    'Relaxation', 'Curiosity', 'OrderInSpace', 'EasyNavigation', 'ComfortableEnv',
+    
+    # Place Attachment items
+    'Identification', 'Belonging',
+    
+    # Positive Affect items
+    'Enjoyment', 'Satisfaction', 'Healthy', 'LightWeighted',
+    
+    # Negative Affect items
+    'Fatigue', 'Tense', 'Anxious', 'Angry', 'Irritated', 'Sluggish',
+    
+    # Other individual items
+    'Duration_s', 'RPE', 'Concentration', 'MoveFreely', 'Exhaustion', 
+    'Challenging', 'PerceivedGreenness', 'MinHR', 'Speed_kmh', 'AvgHR', 'PercentMaxHR',
+    
+    # Environmental perception items
+    'InterestingObserve', 'Monotonous', 'NotMaintained'
 ]
+
+# Check for duplicates
+dep_vars = list(dict.fromkeys(dep_vars))
 print(f"\nAnalyzing {len(dep_vars)} dependent variables: {dep_vars}")
 
 # Define covariates
